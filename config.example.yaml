@@ -43,4 +43,12 @@ planning:
   default_batch_size: 20000
 
 verify:
-  mode: rowcount
+  sample_hash: false
+  sample_rows: 200
+  checks:
+    rowcount: true
+    sample_hash: false
+    indexes: false
+    primary_keys: false
+    matviews: false
+    geometry: false
