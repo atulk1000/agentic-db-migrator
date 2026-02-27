@@ -132,7 +132,7 @@ amo run --config config.yaml --plan plan.json --state state.json
 8) Verify the migration
 amo verify --config config.yaml --plan plan.json --out report.json
 
-
+---
 Project Structure
 src/amo/
   core/
@@ -153,6 +153,7 @@ src/amo/
     openai_stub.py
     ollama_stub.py
 
+---
 ## Roadmap
 
 Full LLM-based planning adapter
@@ -165,7 +166,7 @@ Cross-database engine support
 
 Advanced validation (distribution drift, checksum comparison)
 
-
+---
 ## Motivation
 Traditional migration scripts are:
 
