@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, List
+
 import psycopg2
 from psycopg2 import sql
 
@@ -28,23 +28,6 @@ def _write_json(path: str | Path, obj: Dict[str, Any]) -> None:
 def _fq(schema: str, table: str) -> str:
     return f'"{schema}"."{table}"'
 
-def _table_exists(conn, schema: str, table: str) -> bool:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = %s AND table_name = %s
-            """,
-            (schema, table),
-        )
-        return cur.fetchone() is not None
-
-def _count_rows(conn, schema: str, table: str) -> int:
-    with conn.cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) FROM {_fq(schema, table)};")
-        return int(cur.fetchone()[0])
-
 def _schema_exists(conn, schema: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -64,6 +47,16 @@ def _table_exists(conn, schema: str, table: str) -> bool:
             (schema, table),
         )
         return cur.fetchone() is not None
+
+def _count_rows(conn, schema: str, table: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM {_fq(schema, table)};")
+        return int(cur.fetchone()[0])
+
+
+# -----------------------------
+# Auto-DDL from source
+# -----------------------------
 
 def _fetch_source_columns(conn, schema: str, table: str):
     """
@@ -156,15 +149,12 @@ def _ensure_target_schema_and_table_like_source(
 
     col_defs_sql = []
     for c in cols:
-        # column name + type
         parts = [sql.Identifier(c["name"]), sql.SQL(c["type_sql"])]
 
-        # default (best-effort)
         if c["default_sql"]:
             parts.append(sql.SQL("DEFAULT "))
             parts.append(sql.SQL(c["default_sql"]))
 
-        # not null
         if c["not_null"]:
             parts.append(sql.SQL("NOT NULL"))
 
@@ -189,6 +179,11 @@ def _ensure_target_schema_and_table_like_source(
     with tgt_conn.cursor() as cur:
         cur.execute(create_stmt)
 
+
+# -----------------------------
+# COPY pipeline
+# -----------------------------
+
 def _copy_table_csv(
     src_conn,
     tgt_conn,
@@ -196,6 +191,7 @@ def _copy_table_csv(
     table: str,
     truncate_first: bool = True,
     statement_timeout_ms: Optional[int] = None,
+    auto_ddl: bool = False,
 ) -> None:
     """
     Portable COPY pipeline:
@@ -209,10 +205,22 @@ def _copy_table_csv(
             cur.execute(f"SET statement_timeout = {int(statement_timeout_ms)};")
 
     if not _table_exists(tgt_conn, schema, table):
-        raise RuntimeError(
-            f"Target table {_fq(schema, table)} does not exist. "
-            f"Seed the target with DDL (recommended) or implement auto-DDL creation."
-        )
+        if auto_ddl:
+            _ensure_target_schema_and_table_like_source(
+                src_conn=src_conn,
+                tgt_conn=tgt_conn,
+                schema=schema,
+                table=table,
+            )
+            if not _table_exists(tgt_conn, schema, table):
+                raise RuntimeError(
+                    f"Auto-DDL ran but target table {_fq(schema, table)} still does not exist."
+                )
+        else:
+            raise RuntimeError(
+                f"Target table {_fq(schema, table)} does not exist. "
+                f"Enable engine.auto_ddl=true (auto-create from source) or seed the target with DDL."
+            )
 
     with tgt_conn.cursor() as tgt_cur:
         if truncate_first:
@@ -222,7 +230,6 @@ def _copy_table_csv(
             copy_out = f'COPY (SELECT * FROM {_fq(schema, table)}) TO STDOUT WITH (FORMAT CSV, HEADER false)'
             copy_in  = f'COPY {_fq(schema, table)} FROM STDIN WITH (FORMAT CSV, HEADER false)'
 
-            # stream rows: psycopg2 supports file-like objects; simplest is using copy_expert with STDOUT/STDIN
             import io
             buf = io.StringIO()
             src_cur.copy_expert(copy_out, buf)
@@ -251,6 +258,7 @@ def execute(cfg: Dict[str, Any], plan_path: str, state_path: str) -> None:
     # Optional knobs
     truncate_first = bool(cfg.get("engine", {}).get("copy", {}).get("truncate_first", True))
     statement_timeout_ms = cfg.get("engine", {}).get("copy", {}).get("statement_timeout_ms")
+    auto_ddl = bool(cfg.get("engine", {}).get("auto_ddl", False))
 
     src_dsn = _dsn(src_cfg)
     tgt_dsn = _dsn(tgt_cfg)
@@ -287,6 +295,7 @@ def execute(cfg: Dict[str, Any], plan_path: str, state_path: str) -> None:
                     table=table,
                     truncate_first=truncate_first,
                     statement_timeout_ms=statement_timeout_ms,
+                    auto_ddl=auto_ddl,
                 )
                 tgt_conn.commit()
 
