@@ -103,33 +103,34 @@ Execution logic remains unchanged regardless of planner implementation.
 ## 🚀 Quickstart (Local Demo)
 
 ### 1. Start local Postgres instances
-
+2) Create and activate a virtual environment
+3) Install the package (editable)
+4) Copy config templates
+5) Discover schema metadata (manifest)
+6) Generate an execution plan
+7) Run the migration
+8) Verify the migration
+   
 ```bash
 docker compose up -d
 
 amo discover --config config.yaml --out manifest.json
 
-2) Create and activate a virtual environment
+
 python -m venv .venv
 source .venv/bin/activate
 
-3) Install the package (editable)
 pip install -e .
 
-4) Copy config templates
 cp .env.example .env
 cp config.example.yaml config.yaml
 
-5) Discover schema metadata (manifest)
 amo discover --config config.yaml --out manifest.json
 
-6) Generate an execution plan
 amo plan --manifest manifest.json --planner heuristic --out plan.json
 
-7) Run the migration
 amo run --config config.yaml --plan plan.json --state state.json
 
-8) Verify the migration
 amo verify --config config.yaml --plan plan.json --out report.json
 ```
 
