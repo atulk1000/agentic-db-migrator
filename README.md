@@ -119,10 +119,10 @@ docker compose up -d
 python -m venv .venv
 source .venv/bin/activate
 
-- Powershell
-.\.venv\Scripts\Activate.ps1
-
 pip install -e .
+
+cp .env.example .env
+cp config.example.yaml config.yaml
 
 amo discover --config config.yaml --out manifest.json
 
