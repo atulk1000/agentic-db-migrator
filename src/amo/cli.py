@@ -11,22 +11,22 @@ def discover(
 ):
     load_env(".env")
     cfg = load_config(config)
-
     manifest = build_manifest(cfg)
     write_manifest(manifest, out)
+    print(f"Wrote manifest to {out} ({len(manifest.get('tables', []))} tables, {len(manifest.get('errors', []))} errors)")
 
-    print(f"Wrote manifest to {out} ({len(manifest.get('tables', []))} tables, "
-          f"{len(manifest.get('errors', []))} errors)")
 
 @app.command()
 def plan(
     manifest: str = typer.Option("manifest.json", help="Input manifest path"),
     out: str = typer.Option("plan.json", help="Output plan path"),
 ):
-    print("Planning...")
-    # TODO: from amo.core.heuristic_planner import generate_plan, write_plan
-    # TODO: plan_obj = generate_plan(manifest)
-    # TODO: write_plan(plan_obj, out)
+    from amo.core.heuristic_planner import generate_plan, write_plan
+
+    plan_obj = generate_plan(manifest_path=manifest)
+    write_plan(plan_obj, out)
+    print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
+
 
 @app.command()
 def run(
@@ -34,11 +34,14 @@ def run(
     plan: str = typer.Option("plan.json", help="Path to plan JSON"),
     state: str = typer.Option("state.json", help="Checkpoint state file"),
 ):
+    from amo.core.executor import execute
+
     load_env(".env")
     cfg = load_config(config)
-    print("Running migration with engine:", cfg["engine"]["type"])
-    # TODO: from amo.core.executor import execute
-    # TODO: execute(cfg, plan_path=plan, state_path=state)
+
+    execute(cfg=cfg, plan_path=plan, state_path=state)
+    print(f"Run complete. State saved to {state}")
+
 
 @app.command()
 def verify(
@@ -46,12 +49,14 @@ def verify(
     plan: str = typer.Option("plan.json", help="Path to plan JSON"),
     out: str = typer.Option("report.json", help="Output report path"),
 ):
+    from amo.core.verifier import verify_plan, write_report
+
     load_env(".env")
     cfg = load_config(config)
-    print("Verifying...")
-    # TODO: from amo.core.verifier import verify_plan
-    # TODO: report = verify_plan(cfg, plan_path=plan)
-    # TODO: write_report(report, out)
+
+    report = verify_plan(cfg=cfg, plan_path=plan)
+    write_report(report, out)
+    print(f"Wrote report to {out}")
 
 if __name__ == "__main__":
     app()
