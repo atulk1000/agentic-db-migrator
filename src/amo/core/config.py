@@ -53,14 +53,3 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
     raw = yaml.safe_load(p.read_text()) or {}
     return _substitute_env_vars(raw)
 
-
-verify:
-  sample_hash: false
-  sample_rows: 200
-  checks:
-    rowcount: true
-    sample_hash: false
-    indexes: false
-    primary_keys: false
-    matviews: false
-    geometry: false
