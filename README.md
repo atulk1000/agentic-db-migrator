@@ -1,8 +1,6 @@
-# agentic-db-migrator
-AI-driven database migration orchestrator that reads live schema metadata, generates an execution plan (ordering, batching, partitioning, validations), and runs migrations with guardrails and verification.with safety guardrails and verification
-# 🚀 Agentic Migration Orchestrator
+# 🚀 Agentic DB Migration Orchestrator
 
-An **AI-driven database migration orchestrator** that inspects live schema metadata, generates an execution plan (ordering, partitioning, batching, validations), and executes migrations deterministically with safety guardrails and verification.
+An **AI-driven database migration orchestrator** that reads and inspects live schema metadata, generates an execution plan (ordering, partitioning, batching, validations), and executes migrations deterministically with safety guardrails and verification.
 
 Instead of hardcoding migration logic, this framework allows an intelligent planner to decide *how* the migration should run — while enforcing strict policy controls and resumable execution.
 
