@@ -104,14 +104,14 @@ Execution logic remains unchanged regardless of planner implementation.
 - Docker + Docker Compose
 - Python 3.10+
 
-- 1) Start local Postgres instances
-- 2) Create and activate a virtual environment
-- 3) Install the package (editable)
-- 4) Copy config templates
-- 5) Discover schema metadata (manifest)
-- 6) Generate an execution plan
-- 7) Run the migration
-- 8) Verify the migration
+1) Start local Postgres instances
+2) Create and activate a virtual environment
+3) Install the package (editable)
+4) Copy config templates
+5) Discover schema metadata (manifest)
+6) Generate an execution plan
+7) Run the migration
+8) Verify the migration
    
 ```bash
 docker compose up -d
