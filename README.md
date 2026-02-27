@@ -175,7 +175,7 @@ src/amo/
 ---
 ## 🎯 Motivation
 
-- Traditional migration scripts are:
+Traditional migration scripts are:
 
 - Hardcoded
 
