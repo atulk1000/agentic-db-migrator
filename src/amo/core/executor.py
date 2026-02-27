@@ -5,8 +5,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
-
 import psycopg2
+from psycopg2 import sql
 
 
 # -----------------------------
@@ -44,6 +44,150 @@ def _count_rows(conn, schema: str, table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"SELECT COUNT(*) FROM {_fq(schema, table)};")
         return int(cur.fetchone()[0])
+
+def _schema_exists(conn, schema: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
+            (schema,),
+        )
+        return cur.fetchone() is not None
+
+def _table_exists(conn, schema: str, table: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = %s AND table_name = %s
+            """,
+            (schema, table),
+        )
+        return cur.fetchone() is not None
+
+def _fetch_source_columns(conn, schema: str, table: str):
+    """
+    Returns list of dicts:
+      {name, type_sql, not_null, default_sql}
+    type_sql uses pg_catalog.format_type so it’s accurate.
+    default_sql is pg_get_expr(adbin, adrelid) when present.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                a.attname AS col_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_sql,
+                a.attnotnull AS not_null,
+                pg_get_expr(ad.adbin, ad.adrelid) AS default_sql
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """,
+            (schema, table),
+        )
+        rows = cur.fetchall()
+
+    cols = []
+    for col_name, type_sql, not_null, default_sql in rows:
+        cols.append(
+            {
+                "name": col_name,
+                "type_sql": type_sql,
+                "not_null": bool(not_null),
+                "default_sql": default_sql,  # can be None
+            }
+        )
+    return cols
+
+def _fetch_source_primary_key(conn, schema: str, table: str):
+    """
+    Returns list of PK columns in order, or [] if none.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT a.attname
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace n ON n.oid = rel.relnamespace
+            JOIN unnest(con.conkey) WITH ORDINALITY AS ck(attnum, ord) ON TRUE
+            JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attnum = ck.attnum
+            WHERE con.contype = 'p'
+              AND n.nspname = %s
+              AND rel.relname = %s
+            ORDER BY ck.ord
+            """,
+            (schema, table),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+def _ensure_target_schema_and_table_like_source(
+    src_conn,
+    tgt_conn,
+    schema: str,
+    table: str,
+) -> None:
+    """
+    Creates schema/table on target IF missing, using source definition.
+    - Does not modify existing target objects.
+    - Best-effort defaults + PK.
+    """
+    # Create schema if missing
+    if not _schema_exists(tgt_conn, schema):
+        with tgt_conn.cursor() as cur:
+            cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+
+    # Create table if missing
+    if _table_exists(tgt_conn, schema, table):
+        return
+
+    cols = _fetch_source_columns(src_conn, schema, table)
+    if not cols:
+        raise RuntimeError(f"Source table {schema}.{table} has no columns (unexpected).")
+
+    pk_cols = _fetch_source_primary_key(src_conn, schema, table)
+
+    col_defs_sql = []
+    for c in cols:
+        # column name + type
+        parts = [sql.Identifier(c["name"]), sql.SQL(c["type_sql"])]
+
+        # default (best-effort)
+        if c["default_sql"]:
+            parts.append(sql.SQL("DEFAULT "))
+            parts.append(sql.SQL(c["default_sql"]))
+
+        # not null
+        if c["not_null"]:
+            parts.append(sql.SQL("NOT NULL"))
+
+        col_defs_sql.append(sql.SQL(" ").join(parts))
+
+    constraints_sql = []
+    if pk_cols:
+        constraints_sql.append(
+            sql.SQL("PRIMARY KEY ({})").format(
+                sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols)
+            )
+        )
+
+    all_defs = col_defs_sql + constraints_sql
+
+    create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
+        sql.Identifier(schema),
+        sql.Identifier(table),
+        sql.SQL(", ").join(all_defs),
+    )
+
+    with tgt_conn.cursor() as cur:
+        cur.execute(create_stmt)
 
 def _copy_table_csv(
     src_conn,
