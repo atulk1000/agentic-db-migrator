@@ -1,0 +1,6 @@
+psycopg2-binary
+pydantic>=2
+pyyaml
+typer
+python-dotenv
+rich
