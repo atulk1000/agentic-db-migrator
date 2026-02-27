@@ -8,7 +8,7 @@ def discover(config: str = typer.Option("config.yaml", help="Path to config YAML
     load_env(".env")
     cfg = load_config(config)
     print("Loaded config OK")
-    # TODO: call manifest_builder.build_manifest(cfg)
+    from amo.core.manifest_builder import build_manifest, write_manifest
 
 @app.command()
 def plan(manifest: str = typer.Option("manifest.json"), out: str = typer.Option("plan.json")):
