@@ -102,7 +102,8 @@ Execution logic remains unchanged regardless of planner implementation.
 
 ## 🚀 Quickstart (Local Demo)
 
-### 1. Start local Postgres instances
+### 
+1) Start local Postgres instances
 2) Create and activate a virtual environment
 3) Install the package (editable)
 4) Copy config templates
