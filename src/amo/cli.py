@@ -19,13 +19,33 @@ def discover(
 @app.command()
 def plan(
     manifest: str = typer.Option("manifest.json", help="Input manifest path"),
+    planner: str = typer.Option("heuristic", help="Planner to use: heuristic | openai | ollama"),
     out: str = typer.Option("plan.json", help="Output plan path"),
 ):
-    from amo.core.heuristic_planner import generate_plan, write_plan
+    if planner == "heuristic":
+        from amo.core.heuristic_planner import generate_plan, write_plan
+        plan_obj = generate_plan(manifest_path=manifest)
+        write_plan(plan_obj, out)
+        print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
+        return
 
-    plan_obj = generate_plan(manifest_path=manifest)
-    write_plan(plan_obj, out)
-    print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
+    if planner == "openai":
+        from amo.planners.openai_stub import generate_plan as llm_generate
+        plan_obj = llm_generate(manifest_path=manifest)
+        from amo.core.heuristic_planner import write_plan
+        write_plan(plan_obj, out)
+        print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
+        return
+
+    if planner == "ollama":
+        from amo.planners.ollama_stub import generate_plan as llm_generate
+        plan_obj = llm_generate(manifest_path=manifest)
+        from amo.core.heuristic_planner import write_plan
+        write_plan(plan_obj, out)
+        print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
+        return
+
+    raise typer.BadParameter(f"Unknown planner: {planner}. Use heuristic|openai|ollama")
 
 
 @app.command()
