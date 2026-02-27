@@ -1,0 +1,46 @@
+app:
+  name: agentic-migration-orchestrator
+
+engine:
+  # default: copy (portable). optional: spark (scale)
+  type: copy
+
+source:
+  host: ${SRC_HOST}
+  port: ${SRC_PORT}
+  database: ${SRC_DB}
+  user: ${SRC_USER}
+  password: ${SRC_PASSWORD}
+
+target:
+  host: ${DST_HOST}
+  port: ${DST_PORT}
+  database: ${DST_DB}
+  user: ${DST_USER}
+  password: ${DST_PASSWORD}
+
+migration:
+  include_schemas:
+    - demo
+    - analytics
+
+  exclude_schemas:
+    - pg_catalog
+    - information_schema
+
+  exclude_tables:
+    - spatial_ref_sys
+    - geometry_columns
+    - geography_columns
+
+  exclude_suffixes:
+    - _archive
+    - _table
+
+planning:
+  planner: heuristic
+  max_partitions: 16
+  default_batch_size: 20000
+
+verify:
+  mode: rowcount
