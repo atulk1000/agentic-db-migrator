@@ -1,2 +1,22 @@
-pip install -e .
-amo --help
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-db-migrator"
+version = "0.1.0"
+description = "AI-driven database migration orchestrator"
+authors = [{ name="Atul Kushwaha" }]
+requires-python = ">=3.10"
+
+dependencies = [
+    "psycopg2-binary",
+    "pydantic>=2",
+    "pyyaml",
+    "typer",
+    "python-dotenv",
+    "rich"
+]
+
+[project.scripts]
+amo = "amo.cli:app"
