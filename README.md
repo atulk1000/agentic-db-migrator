@@ -121,8 +121,9 @@ source .venv/bin/activate
 
 pip install -e .
 
-cp .env.example .env
+
 cp config.example.yaml config.yaml
+cp .env.example .env
 
 amo discover --config config.yaml --out manifest.json
 
