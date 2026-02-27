@@ -1,22 +1,33 @@
 import typer
+from amo.core.config import load_env, load_config
 
 app = typer.Typer()
 
 @app.command()
-def discover():
-    print("Discovering schema...")
+def discover(config: str = typer.Option("config.yaml", help="Path to config YAML")):
+    load_env(".env")
+    cfg = load_config(config)
+    print("Loaded config OK")
+    # TODO: call manifest_builder.build_manifest(cfg)
 
 @app.command()
-def plan():
-    print("Generating execution plan...")
+def plan(manifest: str = typer.Option("manifest.json"), out: str = typer.Option("plan.json")):
+    # TODO: planner.generate_plan(...)
+    print("Planning...")
 
 @app.command()
-def run():
-    print("Executing migration...")
+def run(config: str = typer.Option("config.yaml"), plan: str = typer.Option("plan.json")):
+    load_env(".env")
+    cfg = load_config(config)
+    print("Running migration with engine:", cfg["engine"]["type"])
+    # TODO: executor.execute(cfg, plan)
 
 @app.command()
-def verify():
-    print("Verifying migration...")
+def verify(config: str = typer.Option("config.yaml"), plan: str = typer.Option("plan.json")):
+    load_env(".env")
+    cfg = load_config(config)
+    print("Verifying...")
+    # TODO: verifier.verify(cfg, plan)
 
 if __name__ == "__main__":
     app()
