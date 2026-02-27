@@ -4,6 +4,8 @@ app:
 engine:
   # default: copy (portable). optional: spark (scale)
   type: copy
+  auto_ddl: true 
+  
 
 source:
   host: ${SRC_HOST}
