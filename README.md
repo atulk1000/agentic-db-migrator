@@ -131,6 +131,7 @@ amo run --config config.yaml --plan plan.json --state state.json
 
 8) Verify the migration
 amo verify --config config.yaml --plan plan.json --out report.json
+```
 
 ---
 Project Structure
