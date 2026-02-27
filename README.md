@@ -134,7 +134,9 @@ amo verify --config config.yaml --plan plan.json --out report.json
 ```
 
 ---
-##📦 Project Structure
+## 📦 Project Structure
+
+```text
 src/amo/
   core/
     manifest_builder.py
