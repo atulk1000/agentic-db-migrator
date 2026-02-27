@@ -162,31 +162,31 @@ src/amo/
 ---
 ## 🧭 Roadmap
 
-Full LLM-based planning adapter
+- Full LLM-based planning adapter
 
-Intelligent risk scoring for large environments
+- Intelligent risk scoring for large environments
 
-Cost-aware execution strategy optimization
+- Cost-aware execution strategy optimization
 
-Cross-database engine support
+- Cross-database engine support
 
-Advanced validation (distribution drift, checksum comparison)
+- Advanced validation (distribution drift, checksum comparison)
 
 ---
 ## 🎯 Motivation
 
-Traditional migration scripts are:
+- Traditional migration scripts are:
 
-Hardcoded
+- Hardcoded
 
-Environment-specific
+- Environment-specific
 
-Fragile under scale
+- Fragile under scale
 
-Opaque in decision-making
+- Opaque in decision-making
 
-This project explores a safer pattern:
+- This project explores a safer pattern:
 
-Let intelligence decide the plan.
-Let deterministic systems execute it safely.
-Let verification prove correctness
+- Let intelligence decide the plan.
+- Let deterministic systems execute it safely.
+- Let verification prove correctness
