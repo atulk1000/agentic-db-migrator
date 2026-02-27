@@ -1,1 +1,10 @@
-
+.env
+*.log
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+manifest.json
+plan.json
+state.json
+report.json
