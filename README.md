@@ -156,6 +156,7 @@ src/amo/
     openai_stub.py
     ollama_stub.py
 ```
+
 ---
 ## 🧭 Roadmap
 
@@ -171,6 +172,7 @@ Advanced validation (distribution drift, checksum comparison)
 
 ---
 ## 🎯 Motivation
+
 Traditional migration scripts are:
 
 Hardcoded
