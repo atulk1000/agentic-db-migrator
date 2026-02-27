@@ -134,7 +134,7 @@ amo verify --config config.yaml --plan plan.json --out report.json
 ```
 
 ---
-Project Structure
+##📦 Project Structure
 src/amo/
   core/
     manifest_builder.py
@@ -155,7 +155,7 @@ src/amo/
     ollama_stub.py
 
 ---
-## Roadmap
+## 🧭 Roadmap
 
 Full LLM-based planning adapter
 
@@ -168,7 +168,7 @@ Cross-database engine support
 Advanced validation (distribution drift, checksum comparison)
 
 ---
-## Motivation
+## 🎯 Motivation
 Traditional migration scripts are:
 
 Hardcoded
