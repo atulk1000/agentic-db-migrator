@@ -153,7 +153,7 @@ src/amo/
     openai_stub.py
     ollama_stub.py
 
-Roadmap
+## Roadmap
 
 Full LLM-based planning adapter
 
@@ -166,7 +166,7 @@ Cross-database engine support
 Advanced validation (distribution drift, checksum comparison)
 
 
-Motivation
+## Motivation
 Traditional migration scripts are:
 
 Hardcoded
