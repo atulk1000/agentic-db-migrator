@@ -170,7 +170,23 @@ def _ensure_target_schema_and_table_like_source(
     schema: str,
     table: str,
 ) -> None:
-    ...
+    """
+    Creates schema/table on target IF missing, using source definition.
+    - Does not modify existing target objects.
+    - Best-effort defaults + PK.
+    """
+
+    # Create schema if missing
+    if not _schema_exists(tgt_conn, schema):
+        with tgt_conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+            )
+
+    # Create table if missing
+    if _table_exists(tgt_conn, schema, table):
+        return
+
     cols = _fetch_source_columns(src_conn, schema, table)
     if not cols:
         raise RuntimeError(f"Source table {schema}.{table} has no columns (unexpected).")
@@ -184,6 +200,7 @@ def _ensure_target_schema_and_table_like_source(
         parts = [sql.Identifier(c["name"]), sql.SQL(c["type_sql"])]
 
         if c["default_sql"]:
+            # collect nextval('...') sequences so we can create them first
             seq_qnames.extend(_extract_nextval_seq_qnames(c["default_sql"]))
             parts.append(sql.SQL("DEFAULT "))
             parts.append(sql.SQL(c["default_sql"]))
@@ -193,18 +210,27 @@ def _ensure_target_schema_and_table_like_source(
 
         col_defs_sql.append(sql.SQL(" ").join(parts))
 
+    constraints_sql = []
+    if pk_cols:
+        constraints_sql.append(
+            sql.SQL("PRIMARY KEY ({})").format(
+                sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols)
+            )
+        )
+
+    # ✅ THIS is what you’re missing
     all_defs = col_defs_sql + constraints_sql
-    
-    ...
+
     create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
         sql.Identifier(schema),
         sql.Identifier(table),
         sql.SQL(", ").join(all_defs),
     )
 
+    # create sequences referenced by defaults BEFORE creating table
+    _ensure_target_sequences_for_create(tgt_conn, seq_qnames, fallback_schema=schema)
+
     with tgt_conn.cursor() as cur:
-        # Create any referenced sequences BEFORE running CREATE TABLE
-        _ensure_target_sequences_for_create(tgt_conn, seq_qnames, fallback_schema=schema)
         cur.execute(create_stmt)
 
 
