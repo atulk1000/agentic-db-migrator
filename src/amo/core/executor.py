@@ -648,7 +648,7 @@ class MigrationOrchestrator:
             self._put_tgt(tgt)
 
 
-def execute_v2(cfg: Dict[str, Any], plan_path: Optional[str] = None, state_path: str = "state.json") -> None:
+def execute(cfg: Dict[str, Any], plan_path: Optional[str] = None, state_path: str = "state.json") -> None:
     orch = MigrationOrchestrator(cfg)
     state_file = Path(state_path)
 
