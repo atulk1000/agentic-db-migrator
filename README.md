@@ -112,15 +112,15 @@ Execution logic remains unchanged regardless of planner implementation.
 6) Generate an execution plan
 7) Run the migration
 8) Verify the migration
-   
+
+Below are power shell commands in sequence:   
 ```bash
 docker compose up -d
 
 python -m venv .venv
-source .venv/bin/activate
+.\.venv\Scripts\Activate.ps1
 
 pip install -e .
-
 
 cp config.example.yaml config.yaml
 cp .env.example .env
