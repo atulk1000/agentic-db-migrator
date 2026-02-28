@@ -139,6 +139,15 @@ class MigrationOrchestrator:
             cur.execute(q, params)
             return cur.fetchall()
 
+    def copy_table(self, schema: str, table: str) -> None:
+        """
+        Public method invoked by plan step: op == 'copy_table'
+        Ensures schema + table exist (auto-DDL if enabled), then copies data.
+        """
+        self.ensure_schema(schema)
+        self.ensure_table_like_source(schema, table)
+        self._copy_table_psycopg2(schema, table)
+    
     def set_session_settings(self, conn) -> None:
         """
         Runs configured SET statements.
