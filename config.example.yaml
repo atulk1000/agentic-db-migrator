@@ -2,12 +2,13 @@ app:
   name: agentic-migration-orchestrator
 
 engine:
-  # default: copy (portable). optional: spark (scale)
   type: copy
   auto_ddl: true
+  allow_destructive: true     # required if truncate_first=true
+  verify_inline: false        # you can keep external verifier instead
   copy:
     truncate_first: true
-  
+    spool_dir: null           # or "./.spool"
 
 source:
   host: ${SRC_HOST}
