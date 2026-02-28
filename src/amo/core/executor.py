@@ -391,50 +391,72 @@ class MigrationOrchestrator:
             self._put_src(src)
             self._put_tgt(tgt)
  
-    
     def sync_sequences(self, schema: str, table: str) -> None:
+        """
+        Find nextval(...) defaults on target table and setval(seq, max(col)).
+        Safe across NULL defaults / identity columns / unexpected default formats.
+        """
         tgt = self._tgt()
         try:
             tgt.autocommit = True
             self.set_session_settings(tgt)
-
+    
             with tgt.cursor() as cur:
+                # Filter defaults to only those that actually contain nextval(...)
                 cur.execute(
                     """
                     SELECT column_name, column_default
                     FROM information_schema.columns
-                    WHERE table_schema=%s AND table_name=%s
+                    WHERE table_schema=%s
+                      AND table_name=%s
+                      AND column_default IS NOT NULL
                       AND column_default LIKE 'nextval(%'
                     """,
                     (schema, table),
                 )
                 rows = cur.fetchall()
-
-            for col, default in rows:
-                m = _NEXTVAL_RE.search(default or "")
+    
+            for row in rows:
+                # Be defensive about shape
+                if not isinstance(row, (tuple, list)) or len(row) < 2:
+                    continue
+    
+                col, default = row[0], row[1]
+                if not default:
+                    continue
+    
+                m = _NEXTVAL_RE.search(default)
                 if not m:
                     continue
-                qname = m.group(1).replace('"', "")
+    
+                qname = (m.group(1) or "").replace('"', "").strip()
+                if not qname:
+                    continue
+    
                 if "." in qname:
                     seq_schema, seq_name = qname.split(".", 1)
                 else:
                     seq_schema, seq_name = schema, qname
-
+    
+                # Compute max(col) and advance sequence
                 with tgt.cursor() as cur:
                     cur.execute(
                         sql.SQL("SELECT COALESCE(MAX({}), 0) FROM {}").format(
                             sql.Identifier(col), _fq(schema, table)
                         )
                     )
-                    mx = int(cur.fetchone()[0] or 0)
-
+                    mx_row = cur.fetchone()
+                    mx = int(mx_row[0] or 0) if mx_row and len(mx_row) > 0 else 0
+    
                     seq_regclass = f'"{seq_schema}"."{seq_name}"'
                     if mx <= 0:
                         cur.execute("SELECT setval(%s::regclass, 1, false)", (seq_regclass,))
                     else:
                         cur.execute("SELECT setval(%s::regclass, %s, true)", (seq_regclass, mx))
         finally:
-            self._put_tgt(tgt)
+            self._put_tgt(tgt)    
+
+    
 
     def create_indexes(self, schema: str, table: str, indexes: List[Dict[str, Any]]) -> None:
         if not indexes:
