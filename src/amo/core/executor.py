@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 from psycopg2 import pool, sql
+from psycopg2 import extensions as ext
 
 
 ARCHIVED_SUFFIX = "_archive"
@@ -50,6 +51,18 @@ def _read_json(path: str | Path) -> Dict[str, Any]:
 
 def _write_json(path: str | Path, obj: Dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def _ensure_idle(conn) -> None:
+    """
+    Ensure connection is not inside a transaction.
+    This is critical with connection pools + autocommit flips.
+    """
+    try:
+        if conn.status != ext.STATUS_READY:
+            conn.rollback()
+    except Exception:
+        pass
 
 
 @dataclass
@@ -93,15 +106,31 @@ class MigrationOrchestrator:
 
     # -------- connections --------
     def _src(self):
-        return self.src_pool.getconn()
+        c = self.src_pool.getconn()
+        _ensure_idle(c)
+        return c
 
     def _tgt(self):
-        return self.tgt_pool.getconn()
+        c = self.tgt_pool.getconn()
+        _ensure_idle(c)
+        return c
 
-    def _put_src(self, c, close=False):
+    def _put_src(self, c, close: bool = False):
+        # reset pooled connection state
+        try:
+            _ensure_idle(c)
+            c.autocommit = True
+        except Exception:
+            pass
         self.src_pool.putconn(c, close=close)
 
-    def _put_tgt(self, c, close=False):
+    def _put_tgt(self, c, close: bool = False):
+        # reset pooled connection state
+        try:
+            _ensure_idle(c)
+            c.autocommit = True
+        except Exception:
+            pass
         self.tgt_pool.putconn(c, close=close)
 
     # -------- utilities --------
@@ -110,12 +139,11 @@ class MigrationOrchestrator:
             cur.execute(q, params)
             return cur.fetchall()
 
-    def _exec(self, conn, q: str, params: Optional[Tuple[Any, ...]] = None) -> None:
-        with conn.cursor() as cur:
-            cur.execute(q, params or ())
-
     def set_session_settings(self, conn) -> None:
-        # Do NOT force autocommit here; caller controls transactions.
+        """
+        Runs configured SET statements.
+        IMPORTANT: caller must already have the desired autocommit mode set.
+        """
         with conn.cursor() as cur:
             settings = self.cfg.get(
                 "postgres_session_settings",
@@ -164,8 +192,10 @@ class MigrationOrchestrator:
     def ensure_schema(self, schema: str) -> None:
         tgt = self._tgt()
         try:
-            self.set_session_settings(tgt)
+            # autocommit mode must be set BEFORE any SQL
             tgt.autocommit = True
+            self.set_session_settings(tgt)
+
             if not self.schema_exists(tgt, schema):
                 with tgt.cursor() as cur:
                     cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
@@ -195,7 +225,7 @@ class MigrationOrchestrator:
             (schema, table),
         )
 
-        cols = []
+        cols: List[Dict[str, Any]] = []
         for col_name, type_sql, not_null, attidentity, default_sql in rows:
             cols.append(
                 {
@@ -253,10 +283,11 @@ class MigrationOrchestrator:
         src = self._src()
         tgt = self._tgt()
         try:
+            # run DDL in autocommit mode; set mode FIRST
+            src.autocommit = True
+            tgt.autocommit = True
             self.set_session_settings(src)
             self.set_session_settings(tgt)
-
-            tgt.autocommit = True
 
             # schema
             if not self.schema_exists(tgt, schema):
@@ -273,8 +304,10 @@ class MigrationOrchestrator:
 
             pk_cols = self._fetch_source_primary_key(src, schema, table)
 
-            # Create any sequences referenced by DEFAULT nextval(...) before CREATE TABLE
-            self._ensure_sequences_for_defaults(tgt, schema_fallback=schema, default_sqls=[c.get("default_sql") for c in cols])
+            # Create sequences referenced by DEFAULT nextval(...) before CREATE TABLE
+            self._ensure_sequences_for_defaults(
+                tgt, schema_fallback=schema, default_sqls=[c.get("default_sql") for c in cols]
+            )
 
             col_defs = []
             for c in cols:
@@ -316,7 +349,6 @@ class MigrationOrchestrator:
             self._put_tgt(tgt)
 
     def copy_table(self, schema: str, table: str) -> None:
-        # Ensure schema + table before copy
         self.ensure_schema(schema)
         self.ensure_table_like_source(schema, table)
         self._copy_table_psycopg2(schema, table)
@@ -328,10 +360,11 @@ class MigrationOrchestrator:
         src = self._src()
         tgt = self._tgt()
         try:
+            # Source can be autocommit; target must be transactional for TRUNCATE+COPY
+            src.autocommit = True
+            tgt.autocommit = False
             self.set_session_settings(src)
             self.set_session_settings(tgt)
-
-            tgt.autocommit = False
 
             with tgt.cursor() as cur:
                 if self.truncate_first:
@@ -340,7 +373,6 @@ class MigrationOrchestrator:
             copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
             copy_in = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
 
-            # Spool to temp file (avoids RAM blowups)
             with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
                 with tempfile.NamedTemporaryFile(
                     mode="w+",
@@ -353,6 +385,7 @@ class MigrationOrchestrator:
                     tgt_cur.copy_expert(copy_in, f)
 
             tgt.commit()
+
         except Exception:
             try:
                 tgt.rollback()
@@ -364,13 +397,10 @@ class MigrationOrchestrator:
             self._put_tgt(tgt)
 
     def sync_sequences(self, schema: str, table: str) -> None:
-        """
-        Find nextval(...) defaults on target table and setval(seq, max(col)).
-        """
         tgt = self._tgt()
         try:
-            self.set_session_settings(tgt)
             tgt.autocommit = True
+            self.set_session_settings(tgt)
 
             with tgt.cursor() as cur:
                 cur.execute(
@@ -395,15 +425,13 @@ class MigrationOrchestrator:
                     seq_schema, seq_name = schema, qname
 
                 with tgt.cursor() as cur:
-                    # max(id)
                     cur.execute(
-                        sql.SQL('SELECT COALESCE(MAX({}), 0) FROM {}').format(
+                        sql.SQL("SELECT COALESCE(MAX({}), 0) FROM {}").format(
                             sql.Identifier(col), _fq(schema, table)
                         )
                     )
                     mx = int(cur.fetchone()[0] or 0)
 
-                    # setval
                     seq_regclass = f'"{seq_schema}"."{seq_name}"'
                     if mx <= 0:
                         cur.execute("SELECT setval(%s::regclass, 1, false)", (seq_regclass,))
@@ -413,67 +441,49 @@ class MigrationOrchestrator:
             self._put_tgt(tgt)
 
     def create_indexes(self, schema: str, table: str, indexes: List[Dict[str, Any]]) -> None:
-        """
-        Execute pg_get_indexdef() strings (from manifest) on target.
-        Skips duplicates gracefully.
-        """
         if not indexes:
             return
 
         tgt = self._tgt()
         try:
+            tgt.autocommit = True
             self.set_session_settings(tgt)
 
             for idx in indexes:
                 stmt = idx.get("index_definition")
                 cluster_stmt = idx.get("cluster_statement")
-
                 if not stmt:
                     continue
 
-                # CREATE INDEX CONCURRENTLY can't run inside a transaction block
                 needs_autocommit = "CONCURRENTLY" in stmt.upper()
                 prev_autocommit = tgt.autocommit
-                tgt.autocommit = True if needs_autocommit else True
+                if needs_autocommit:
+                    tgt.autocommit = True
 
                 try:
                     with tgt.cursor() as cur:
                         try:
                             cur.execute(stmt)
                         except psycopg2.Error as e:
-                            # 42P07 = duplicate_relation (index exists)
                             if e.pgcode in ("42P07", "42710"):
                                 pass
                             else:
                                 raise
-
                         if cluster_stmt:
-                            try:
-                                cur.execute(cluster_stmt)
-                            except psycopg2.Error as e:
-                                if e.pgcode in ("42P07", "42710"):
-                                    pass
-                                else:
-                                    # CLUSTER failures are usually non-fatal; choose strict or lenient
-                                    raise
+                            cur.execute(cluster_stmt)
                 finally:
                     tgt.autocommit = prev_autocommit
         finally:
             self._put_tgt(tgt)
 
     def add_fks(self, schema: str, fks: List[Dict[str, Any]]) -> None:
-        """
-        Add FK constraints after load.
-        Each fk entry expected:
-          {schema, table, name, definition}
-        """
         if not fks:
             return
 
         tgt = self._tgt()
         try:
-            self.set_session_settings(tgt)
             tgt.autocommit = True
+            self.set_session_settings(tgt)
 
             for fk in fks:
                 t_schema = fk.get("schema", schema)
@@ -483,17 +493,15 @@ class MigrationOrchestrator:
                 if not (t_table and conname and condef):
                     continue
 
-                stmt = sql.SQL('ALTER TABLE {} ADD CONSTRAINT {} {}').format(
+                stmt = sql.SQL("ALTER TABLE {} ADD CONSTRAINT {} {}").format(
                     _fq(t_schema, t_table),
                     sql.Identifier(conname),
                     sql.SQL(condef),
                 )
-
                 with tgt.cursor() as cur:
                     try:
                         cur.execute(stmt)
                     except psycopg2.Error as e:
-                        # 42710 duplicate_object
                         if e.pgcode in ("42710",):
                             pass
                         else:
@@ -507,10 +515,9 @@ class MigrationOrchestrator:
 
         tgt = self._tgt()
         try:
-            self.set_session_settings(tgt)
             tgt.autocommit = True
+            self.set_session_settings(tgt)
 
-            # ensure schema exists
             if not self.schema_exists(tgt, schema):
                 with tgt.cursor() as cur:
                     cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
@@ -520,12 +527,10 @@ class MigrationOrchestrator:
                 definition = mv.get("definition")
                 if not name or not definition:
                     continue
-
                 if self.matview_exists(tgt, schema, name):
                     continue
 
-                # pg_get_viewdef gives SELECT body; wrap it
-                stmt = sql.SQL('CREATE MATERIALIZED VIEW {} AS {} WITH DATA').format(
+                stmt = sql.SQL("CREATE MATERIALIZED VIEW {} AS {} WITH DATA").format(
                     _fq(schema, name),
                     sql.SQL(definition),
                 )
@@ -540,8 +545,8 @@ class MigrationOrchestrator:
 
         tgt = self._tgt()
         try:
-            self.set_session_settings(tgt)
             tgt.autocommit = True
+            self.set_session_settings(tgt)
 
             for idx in indexes:
                 stmt = idx.get("index_definition")
@@ -566,8 +571,9 @@ class MigrationOrchestrator:
             return
         tgt = self._tgt()
         try:
-            self.set_session_settings(tgt)
             tgt.autocommit = True
+            self.set_session_settings(tgt)
+
             for f in udfs:
                 stmt = f.get("create_statement")
                 if not stmt:
@@ -577,12 +583,7 @@ class MigrationOrchestrator:
         finally:
             self._put_tgt(tgt)
 
-    # --- inline verification hook (optional) ---
     def verify_table(self, schema: str, table: str, validate: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Simple inline verifier (rowcount + optional sample hash).
-        If you prefer, keep using your external verifier script.
-        """
         import hashlib
 
         sample_hash = bool((validate or {}).get("sample_hash", False))
