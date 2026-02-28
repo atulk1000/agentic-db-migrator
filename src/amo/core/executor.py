@@ -193,6 +193,8 @@ def _ensure_target_schema_and_table_like_source(
 
         col_defs_sql.append(sql.SQL(" ").join(parts))
 
+    all_defs = col_defs_sql + constraints_sql
+    
     ...
     create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
         sql.Identifier(schema),
