@@ -347,55 +347,50 @@ class MigrationOrchestrator:
         finally:
             self._put_src(src)
             self._put_tgt(tgt)
-
-    def copy_table(self, schema: str, table: str) -> None:
-        self.ensure_schema(schema)
-        self.ensure_table_like_source(schema, table)
-        self._copy_table_psycopg2(schema, table)
-
+            
     def _copy_table_psycopg2(self, schema: str, table: str) -> None:
-    if self.truncate_first and not self.allow_destructive:
-        raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
-
-    src = self._src()
-    tgt = self._tgt()
-    try:
-        # Source can be autocommit; target transactional for TRUNCATE+COPY
-        src.autocommit = True
-        tgt.autocommit = False
-        self.set_session_settings(src)
-        self.set_session_settings(tgt)
-
-        with tgt.cursor() as cur:
-            if self.truncate_first:
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(_fq(schema, table)))
-
-        copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
-        copy_in  = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
-
-        with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
-            # ✅ binary temp file to handle bytes from psycopg2 COPY
-            with tempfile.NamedTemporaryFile(
-                mode="w+b",
-                suffix=f"__{schema}__{table}.csv",
-                dir=self.spool_dir,
-            ) as f:
-                src_cur.copy_expert(copy_out, f)
-                f.seek(0)
-                tgt_cur.copy_expert(copy_in, f)
-
-        tgt.commit()
-
-    except Exception:
+        if self.truncate_first and not self.allow_destructive:
+            raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
+    
+        src = self._src()
+        tgt = self._tgt()
         try:
-            tgt.rollback()
+            # Source can be autocommit; target transactional for TRUNCATE+COPY
+            src.autocommit = True
+            tgt.autocommit = False
+            self.set_session_settings(src)
+            self.set_session_settings(tgt)
+    
+            with tgt.cursor() as cur:
+                if self.truncate_first:
+                    cur.execute(sql.SQL("TRUNCATE TABLE {}").format(_fq(schema, table)))
+    
+            copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
+            copy_in  = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
+    
+            with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
+                # ✅ binary temp file to handle bytes from psycopg2 COPY
+                with tempfile.NamedTemporaryFile(
+                    mode="w+b",
+                    suffix=f"__{schema}__{table}.csv",
+                    dir=self.spool_dir,
+                ) as f:
+                    src_cur.copy_expert(copy_out, f)
+                    f.seek(0)
+                    tgt_cur.copy_expert(copy_in, f)
+    
+            tgt.commit()
+    
         except Exception:
-            pass
-        raise
-    finally:
-        self._put_src(src)
-        self._put_tgt(tgt)
-
+            try:
+                tgt.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            self._put_src(src)
+            self._put_tgt(tgt)
+ 
     
     def sync_sequences(self, schema: str, table: str) -> None:
         tgt = self._tgt()
