@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,18 +11,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 from psycopg2 import pool, sql
 
-try:
-    # Optional — only required when engine.type == "spark"
-    from pyspark.sql import SparkSession
-    from pyspark.sql import functions as F
-except Exception:
-    SparkSession = None
-    F = None
-
-
-# -----------------------------------------------------------------------------
-# V2: Production-style Migration Orchestrator
-# -----------------------------------------------------------------------------
 
 ARCHIVED_SUFFIX = "_archive"
 TABLE_SUFFIX = "_table"
@@ -34,9 +23,10 @@ DEFAULT_SYSTEM_TABLES = {
     "raster_overviews",
 }
 
+_NEXTVAL_RE = re.compile(r"nextval\('([^']+)'\s*(?:::regclass)?\)", re.IGNORECASE)
+
 
 def _dsn(db_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    # For psycopg2 pool params
     return dict(
         host=db_cfg["host"],
         port=db_cfg.get("port", 5432),
@@ -61,123 +51,6 @@ def _read_json(path: str | Path) -> Dict[str, Any]:
 def _write_json(path: str | Path, obj: Dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(obj, indent=2, sort_keys=True))
 
-
-# -----------------------------------------------------------------------------
-# Fetch SQL (mirrors your large script capabilities)
-# -----------------------------------------------------------------------------
-
-FETCH_TABLES_SQL = """
-SELECT table_name
-FROM information_schema.tables
-WHERE table_schema = %s AND table_type = 'BASE TABLE'
-ORDER BY table_name
-"""
-
-FETCH_COLUMNS_SQL = """
-SELECT column_name, data_type, udt_name
-FROM information_schema.columns
-WHERE table_schema = %s AND table_name = %s
-ORDER BY ordinal_position
-"""
-
-FETCH_PRIMARY_KEYS_SQL = """
-SELECT
-    tc.constraint_name,
-    tc.table_schema,
-    tc.table_name,
-    kcu.column_name,
-    kcu.ordinal_position
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-    ON tc.constraint_name = kcu.constraint_name
-    AND tc.table_schema = kcu.table_schema
-    AND tc.table_name = kcu.table_name
-WHERE tc.constraint_type = 'PRIMARY KEY'
-  AND tc.table_schema = %s
-ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
-"""
-
-FETCH_MATVIEWS_SQL = """
-SELECT m.matviewname,
-       pg_get_viewdef(('"' || ns.nspname || '"."' || m.matviewname || '"')::regclass, true) AS definition
-FROM pg_matviews m
-JOIN pg_namespace ns ON m.schemaname = ns.nspname
-WHERE ns.nspname = %s
-"""
-
-FETCH_MV_INDEXES_SQL = """
-SELECT
-    ns.nspname AS schema_name,
-    t.relname AS view_name,
-    i.relname AS index_name,
-    pg_get_indexdef(i.oid) AS index_definition,
-    CASE WHEN ix.indisclustered
-         THEN 'CLUSTER ' || ns.nspname || '."' || t.relname || '" USING ' || i.relname
-         ELSE NULL
-    END AS cluster_statement
-FROM pg_class t
-JOIN pg_namespace ns ON t.relnamespace = ns.oid
-JOIN pg_index ix ON t.oid = ix.indrelid
-JOIN pg_class i ON i.oid = ix.indexrelid
-WHERE t.relkind = 'm'
-  AND i.relkind = 'i'
-  AND NOT ix.indisprimary
-  AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid)
-  AND ns.nspname = %s
-ORDER BY t.relname, i.relname
-"""
-
-FETCH_USER_INDEXES_SQL = """
-WITH parents AS (
-  SELECT c.oid, c.relname
-  FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = %(schema)s
-    AND c.relname = ANY(%(tables)s::text[])
-)
-SELECT n.nspname AS schema_name,
-       p.relname AS table_name,
-       i.relname AS index_name,
-       pg_get_indexdef(i.oid) AS index_definition,
-       CASE WHEN ix.indisclustered
-            THEN format('CLUSTER %%I.%%I USING %%I', n.nspname, p.relname, i.relname)
-       END AS cluster_statement
-FROM parents p
-JOIN pg_class t ON t.oid = p.oid
-JOIN pg_namespace n ON n.oid = t.relnamespace
-JOIN pg_index ix ON ix.indrelid = p.oid
-JOIN pg_class i ON i.oid = ix.indexrelid
-WHERE i.relkind IN ('i','I')
-  AND NOT ix.indisprimary
-  AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid)
-ORDER BY p.relname, i.relname
-"""
-
-FETCH_UDFS_SQL = """
-SELECT n.nspname AS schema_name,
-       p.proname AS function_name,
-       pg_get_functiondef(p.oid) AS create_statement
-FROM pg_proc p
-JOIN pg_namespace n ON p.pronamespace = n.oid
-WHERE n.nspname = %s
-  AND n.nspname !~ '^pg_'
-  AND n.nspname <> 'information_schema'
-  AND p.prokind = 'f'
-  AND NOT EXISTS (
-      SELECT 1
-      FROM pg_depend d
-      JOIN pg_extension e ON d.refobjid = e.oid
-      WHERE d.classid = (SELECT oid FROM pg_class WHERE relname = 'pg_proc')
-        AND d.objid = p.oid
-        AND e.extname = 'postgis'
-  )
-ORDER BY p.proname
-"""
-
-
-# -----------------------------------------------------------------------------
-# Core class
-# -----------------------------------------------------------------------------
 
 @dataclass
 class MigrationPolicy:
@@ -205,19 +78,16 @@ class MigrationOrchestrator:
         self.src_pool = pool.SimpleConnectionPool(1, 20, **_dsn(cfg["source"]))
         self.tgt_pool = pool.SimpleConnectionPool(1, 20, **_dsn(cfg["target"]))
 
-        self.spark = None
-        if self.engine_type == "spark":
-            if SparkSession is None:
-                raise RuntimeError("Spark engine requested but pyspark is not installed / available.")
-            self.spark = SparkSession.builder.appName("AgenticDBMigrator").getOrCreate()
+        # Safety flags
+        self.allow_destructive = bool(cfg.get("engine", {}).get("allow_destructive", False))
+        self.auto_ddl = bool(cfg.get("engine", {}).get("auto_ddl", True))
+        self.truncate_first = bool(cfg.get("engine", {}).get("copy", {}).get("truncate_first", True))
+        self.spool_dir = cfg.get("engine", {}).get("copy", {}).get("spool_dir")  # optional
+
+        self.verify_inline = bool(cfg.get("engine", {}).get("verify_inline", False))
 
     # -------- lifecycle --------
     def close(self):
-        try:
-            if self.spark:
-                self.spark.stop()
-        except Exception:
-            pass
         self.src_pool.closeall()
         self.tgt_pool.closeall()
 
@@ -244,54 +114,217 @@ class MigrationOrchestrator:
         with conn.cursor() as cur:
             cur.execute(q, params or ())
 
-    # -----------------------------------------------------------------------------
-    # V2 capabilities (mirrors your big script categories)
-    # -----------------------------------------------------------------------------
-
     def set_session_settings(self, conn) -> None:
-        conn.autocommit = True
+        # Do NOT force autocommit here; caller controls transactions.
         with conn.cursor() as cur:
-            # keep minimal, configurable
-            settings = self.cfg.get("postgres_session_settings", {
-                "SET synchronous_commit TO OFF;": None,
-                "SET work_mem = '256MB';": None,
-                "SET maintenance_work_mem = '1GB';": None,
-            })
+            settings = self.cfg.get(
+                "postgres_session_settings",
+                {
+                    "SET synchronous_commit TO OFF;": None,
+                    "SET work_mem = '256MB';": None,
+                    "SET maintenance_work_mem = '1GB';": None,
+                },
+            )
             for stmt in settings:
                 try:
                     cur.execute(stmt)
                 except Exception:
                     pass
 
-    def list_tables(self, schema: str) -> List[str]:
-        c = self._src()
-        try:
-            rows = self._fetch(c, FETCH_TABLES_SQL, (schema,))
-            return [r[0] for r in rows]
-        finally:
-            self._put_src(c)
+    # -------- existence checks --------
+    def schema_exists(self, conn, schema: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.schemata WHERE schema_name=%s", (schema,))
+            return cur.fetchone() is not None
 
-    def get_columns(self, schema: str, table: str) -> List[Tuple[str, str, str]]:
-        c = self._src()
+    def table_exists(self, conn, schema: str, table: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema=%s AND table_name=%s
+                """,
+                (schema, table),
+            )
+            return cur.fetchone() is not None
+
+    def matview_exists(self, conn, schema: str, name: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM pg_matviews
+                WHERE schemaname=%s AND matviewname=%s
+                """,
+                (schema, name),
+            )
+            return cur.fetchone() is not None
+
+    # -------- core ops --------
+    def ensure_schema(self, schema: str) -> None:
+        tgt = self._tgt()
         try:
-            return self._fetch(c, FETCH_COLUMNS_SQL, (schema, table))
+            self.set_session_settings(tgt)
+            tgt.autocommit = True
+            if not self.schema_exists(tgt, schema):
+                with tgt.cursor() as cur:
+                    cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
         finally:
-            self._put_src(c)
+            self._put_tgt(tgt)
+
+    def _fetch_source_columns_for_ddl(self, src_conn, schema: str, table: str) -> List[Dict[str, Any]]:
+        rows = self._fetch(
+            src_conn,
+            """
+            SELECT
+                a.attname AS col_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_sql,
+                a.attnotnull AS not_null,
+                a.attidentity AS attidentity,
+                pg_get_expr(ad.adbin, ad.adrelid) AS default_sql
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """,
+            (schema, table),
+        )
+
+        cols = []
+        for col_name, type_sql, not_null, attidentity, default_sql in rows:
+            cols.append(
+                {
+                    "name": col_name,
+                    "type_sql": type_sql,
+                    "not_null": bool(not_null),
+                    "attidentity": attidentity or "",
+                    "default_sql": default_sql,
+                }
+            )
+        return cols
+
+    def _fetch_source_primary_key(self, src_conn, schema: str, table: str) -> List[str]:
+        rows = self._fetch(
+            src_conn,
+            """
+            SELECT a.attname
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace n ON n.oid = rel.relnamespace
+            JOIN unnest(con.conkey) WITH ORDINALITY AS ck(attnum, ord) ON TRUE
+            JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attnum = ck.attnum
+            WHERE con.contype = 'p'
+              AND n.nspname = %s
+              AND rel.relname = %s
+            ORDER BY ck.ord
+            """,
+            (schema, table),
+        )
+        return [r[0] for r in rows]
+
+    def _ensure_sequences_for_defaults(self, tgt_conn, schema_fallback: str, default_sqls: List[str]) -> None:
+        seq_qnames: List[str] = []
+        for d in default_sqls:
+            if not d:
+                continue
+            seq_qnames.extend(_NEXTVAL_RE.findall(d))
+        if not seq_qnames:
+            return
+
+        with tgt_conn.cursor() as cur:
+            for qname in sorted(set(seq_qnames)):
+                qname = qname.replace('"', "")
+                if "." in qname:
+                    sch, seq = qname.split(".", 1)
+                else:
+                    sch, seq = schema_fallback, qname
+                cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(sch)))
+                cur.execute(sql.SQL("CREATE SEQUENCE IF NOT EXISTS {}.{}").format(sql.Identifier(sch), sql.Identifier(seq)))
+
+    def ensure_table_like_source(self, schema: str, table: str) -> None:
+        if not self.auto_ddl:
+            return
+
+        src = self._src()
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(src)
+            self.set_session_settings(tgt)
+
+            tgt.autocommit = True
+
+            # schema
+            if not self.schema_exists(tgt, schema):
+                with tgt.cursor() as cur:
+                    cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+
+            # table
+            if self.table_exists(tgt, schema, table):
+                return
+
+            cols = self._fetch_source_columns_for_ddl(src, schema, table)
+            if not cols:
+                raise RuntimeError(f"Source table {schema}.{table} has no columns")
+
+            pk_cols = self._fetch_source_primary_key(src, schema, table)
+
+            # Create any sequences referenced by DEFAULT nextval(...) before CREATE TABLE
+            self._ensure_sequences_for_defaults(tgt, schema_fallback=schema, default_sqls=[c.get("default_sql") for c in cols])
+
+            col_defs = []
+            for c in cols:
+                parts = [sql.Identifier(c["name"]), sql.SQL(c["type_sql"])]
+
+                # Identity columns: prefer identity over copying default nextval
+                if c.get("attidentity") in ("a", "d"):
+                    if c["attidentity"] == "a":
+                        parts.append(sql.SQL("GENERATED ALWAYS AS IDENTITY"))
+                    else:
+                        parts.append(sql.SQL("GENERATED BY DEFAULT AS IDENTITY"))
+                else:
+                    if c.get("default_sql"):
+                        parts.append(sql.SQL("DEFAULT "))
+                        parts.append(sql.SQL(c["default_sql"]))
+
+                if c.get("not_null"):
+                    parts.append(sql.SQL("NOT NULL"))
+
+                col_defs.append(sql.SQL(" ").join(parts))
+
+            constraints = []
+            if pk_cols:
+                constraints.append(
+                    sql.SQL("PRIMARY KEY ({})").format(sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols))
+                )
+
+            create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
+                sql.Identifier(schema),
+                sql.Identifier(table),
+                sql.SQL(", ").join(col_defs + constraints),
+            )
+
+            with tgt.cursor() as cur:
+                cur.execute(create_stmt)
+
+        finally:
+            self._put_src(src)
+            self._put_tgt(tgt)
 
     def copy_table(self, schema: str, table: str) -> None:
-        """
-        Engine adapter:
-          - copy: psycopg2 COPY streaming
-          - spark: Spark JDBC (optional)
-        """
-        if self.engine_type == "copy":
-            self._copy_table_psycopg2(schema, table)
-        elif self.engine_type == "spark":
-            self._copy_table_spark(schema, table)
-        else:
-            raise RuntimeError(f"Unknown engine.type: {self.engine_type}")
+        # Ensure schema + table before copy
+        self.ensure_schema(schema)
+        self.ensure_table_like_source(schema, table)
+        self._copy_table_psycopg2(schema, table)
 
     def _copy_table_psycopg2(self, schema: str, table: str) -> None:
+        if self.truncate_first and not self.allow_destructive:
+            raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
+
         src = self._src()
         tgt = self._tgt()
         try:
@@ -299,24 +332,27 @@ class MigrationOrchestrator:
             self.set_session_settings(tgt)
 
             tgt.autocommit = False
-            with tgt.cursor() as cur:
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(_fq(schema, table)))
 
+            with tgt.cursor() as cur:
+                if self.truncate_first:
+                    cur.execute(sql.SQL("TRUNCATE TABLE {}").format(_fq(schema, table)))
+
+            copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
+            copy_in = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
+
+            # Spool to temp file (avoids RAM blowups)
             with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
-                import io
-                buf = io.StringIO()
-                src_cur.copy_expert(
-                    f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)',
-                    buf,
-                )
-                buf.seek(0)
-                tgt_cur.copy_expert(
-                    f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)',
-                    buf,
-                )
+                with tempfile.NamedTemporaryFile(
+                    mode="w+",
+                    newline="",
+                    suffix=f"__{schema}__{table}.csv",
+                    dir=self.spool_dir,
+                ) as f:
+                    src_cur.copy_expert(copy_out, f)
+                    f.seek(0)
+                    tgt_cur.copy_expert(copy_in, f)
 
             tgt.commit()
-
         except Exception:
             try:
                 tgt.rollback()
@@ -327,175 +363,369 @@ class MigrationOrchestrator:
             self._put_src(src)
             self._put_tgt(tgt)
 
-    def _copy_table_spark(self, schema: str, table: str) -> None:
+    def sync_sequences(self, schema: str, table: str) -> None:
         """
-        Optional: Spark JDBC engine. Keep this as "advanced path" in README.
+        Find nextval(...) defaults on target table and setval(seq, max(col)).
         """
-        assert self.spark is not None
-        jdbc_src = self.cfg["source"]["jdbc_url"]
-        jdbc_tgt = self.cfg["target"]["jdbc_url"]
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(tgt)
+            tgt.autocommit = True
 
-        src_props = self.cfg["source"].get("jdbc_properties", {})
-        tgt_props = self.cfg["target"].get("jdbc_properties", {})
+            with tgt.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema=%s AND table_name=%s
+                      AND column_default LIKE 'nextval(%'
+                    """,
+                    (schema, table),
+                )
+                rows = cur.fetchall()
 
-        df = (
-            self.spark.read.format("jdbc")
-            .option("url", jdbc_src)
-            .option("dbtable", f'"{schema}"."{table}"')
-            .options(**src_props)
-            .load()
-        )
+            for col, default in rows:
+                m = _NEXTVAL_RE.search(default or "")
+                if not m:
+                    continue
+                qname = m.group(1).replace('"', "")
+                if "." in qname:
+                    seq_schema, seq_name = qname.split(".", 1)
+                else:
+                    seq_schema, seq_name = schema, qname
 
-        (
-            df.write.format("jdbc")
-            .option("url", jdbc_tgt)
-            .option("dbtable", f'"{schema}"."{table}"')
-            .options(**tgt_props)
-            .mode("overwrite")
-            .save()
-        )
+                with tgt.cursor() as cur:
+                    # max(id)
+                    cur.execute(
+                        sql.SQL('SELECT COALESCE(MAX({}), 0) FROM {}').format(
+                            sql.Identifier(col), _fq(schema, table)
+                        )
+                    )
+                    mx = int(cur.fetchone()[0] or 0)
 
-    # --- Geometry conversion (EWKB bytea → geometry) ---
-    def convert_bytea_to_geometry(self, schema: str, table: str, columns: List[Tuple[str, str, str]]) -> None:
+                    # setval
+                    seq_regclass = f'"{seq_schema}"."{seq_name}"'
+                    if mx <= 0:
+                        cur.execute("SELECT setval(%s::regclass, 1, false)", (seq_regclass,))
+                    else:
+                        cur.execute("SELECT setval(%s::regclass, %s, true)", (seq_regclass, mx))
+        finally:
+            self._put_tgt(tgt)
+
+    def create_indexes(self, schema: str, table: str, indexes: List[Dict[str, Any]]) -> None:
         """
-        If geometry columns were extracted as EWKB into bytea/text, convert back.
-        In V2 you can call this after Spark JDBC writes (or if you choose EWKB extraction).
+        Execute pg_get_indexdef() strings (from manifest) on target.
+        Skips duplicates gracefully.
         """
+        if not indexes:
+            return
+
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(tgt)
+
+            for idx in indexes:
+                stmt = idx.get("index_definition")
+                cluster_stmt = idx.get("cluster_statement")
+
+                if not stmt:
+                    continue
+
+                # CREATE INDEX CONCURRENTLY can't run inside a transaction block
+                needs_autocommit = "CONCURRENTLY" in stmt.upper()
+                prev_autocommit = tgt.autocommit
+                tgt.autocommit = True if needs_autocommit else True
+
+                try:
+                    with tgt.cursor() as cur:
+                        try:
+                            cur.execute(stmt)
+                        except psycopg2.Error as e:
+                            # 42P07 = duplicate_relation (index exists)
+                            if e.pgcode in ("42P07", "42710"):
+                                pass
+                            else:
+                                raise
+
+                        if cluster_stmt:
+                            try:
+                                cur.execute(cluster_stmt)
+                            except psycopg2.Error as e:
+                                if e.pgcode in ("42P07", "42710"):
+                                    pass
+                                else:
+                                    # CLUSTER failures are usually non-fatal; choose strict or lenient
+                                    raise
+                finally:
+                    tgt.autocommit = prev_autocommit
+        finally:
+            self._put_tgt(tgt)
+
+    def add_fks(self, schema: str, fks: List[Dict[str, Any]]) -> None:
+        """
+        Add FK constraints after load.
+        Each fk entry expected:
+          {schema, table, name, definition}
+        """
+        if not fks:
+            return
+
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(tgt)
+            tgt.autocommit = True
+
+            for fk in fks:
+                t_schema = fk.get("schema", schema)
+                t_table = fk.get("table")
+                conname = fk.get("name")
+                condef = fk.get("definition")
+                if not (t_table and conname and condef):
+                    continue
+
+                stmt = sql.SQL('ALTER TABLE {} ADD CONSTRAINT {} {}').format(
+                    _fq(t_schema, t_table),
+                    sql.Identifier(conname),
+                    sql.SQL(condef),
+                )
+
+                with tgt.cursor() as cur:
+                    try:
+                        cur.execute(stmt)
+                    except psycopg2.Error as e:
+                        # 42710 duplicate_object
+                        if e.pgcode in ("42710",):
+                            pass
+                        else:
+                            raise
+        finally:
+            self._put_tgt(tgt)
+
+    def create_matviews(self, schema: str, matviews: List[Dict[str, Any]]) -> None:
+        if not matviews:
+            return
+
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(tgt)
+            tgt.autocommit = True
+
+            # ensure schema exists
+            if not self.schema_exists(tgt, schema):
+                with tgt.cursor() as cur:
+                    cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+
+            for mv in matviews:
+                name = mv.get("name")
+                definition = mv.get("definition")
+                if not name or not definition:
+                    continue
+
+                if self.matview_exists(tgt, schema, name):
+                    continue
+
+                # pg_get_viewdef gives SELECT body; wrap it
+                stmt = sql.SQL('CREATE MATERIALIZED VIEW {} AS {} WITH DATA').format(
+                    _fq(schema, name),
+                    sql.SQL(definition),
+                )
+                with tgt.cursor() as cur:
+                    cur.execute(stmt)
+        finally:
+            self._put_tgt(tgt)
+
+    def create_mv_indexes(self, schema: str, indexes: List[Dict[str, Any]]) -> None:
+        if not indexes:
+            return
+
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(tgt)
+            tgt.autocommit = True
+
+            for idx in indexes:
+                stmt = idx.get("index_definition")
+                cluster_stmt = idx.get("cluster_statement")
+                if not stmt:
+                    continue
+                with tgt.cursor() as cur:
+                    try:
+                        cur.execute(stmt)
+                    except psycopg2.Error as e:
+                        if e.pgcode in ("42P07", "42710"):
+                            pass
+                        else:
+                            raise
+                    if cluster_stmt:
+                        cur.execute(cluster_stmt)
+        finally:
+            self._put_tgt(tgt)
+
+    def create_udfs(self, schema: str, udfs: List[Dict[str, Any]]) -> None:
+        if not udfs:
+            return
+        tgt = self._tgt()
+        try:
+            self.set_session_settings(tgt)
+            tgt.autocommit = True
+            for f in udfs:
+                stmt = f.get("create_statement")
+                if not stmt:
+                    continue
+                with tgt.cursor() as cur:
+                    cur.execute(stmt)
+        finally:
+            self._put_tgt(tgt)
+
+    # --- inline verification hook (optional) ---
+    def verify_table(self, schema: str, table: str, validate: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Simple inline verifier (rowcount + optional sample hash).
+        If you prefer, keep using your external verifier script.
+        """
+        import hashlib
+
+        sample_hash = bool((validate or {}).get("sample_hash", False))
+        sample_rows = int((validate or {}).get("sample_rows", 50))
+
         src = self._src()
         tgt = self._tgt()
         try:
-            tgt.autocommit = False
-            with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
-                TM_SQL = """
-                SELECT postgis.postgis_typmod_type(a.atttypmod),
-                       postgis.postgis_typmod_srid(a.atttypmod)
-                  FROM pg_attribute a
-                  JOIN pg_class c ON a.attrelid = c.oid
-                  JOIN pg_namespace n ON c.relnamespace = n.oid
-                 WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s
-                   AND NOT a.attisdropped;
-                """
-                for col_name, _, udt in columns:
-                    if udt != "geometry":
-                        continue
+            src.autocommit = True
+            tgt.autocommit = True
 
-                    src_cur.execute(TM_SQL, (schema, table, col_name))
-                    dev_gtype, dev_srid = src_cur.fetchone() or (None, None)
+            def count_rows(conn) -> int:
+                with conn.cursor() as cur:
+                    cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(_fq(schema, table)))
+                    return int(cur.fetchone()[0])
 
-                    if dev_gtype and dev_srid and dev_srid > 0:
-                        type_clause = sql.SQL("postgis.geometry({}, {})").format(
-                            sql.SQL(dev_gtype), sql.Literal(int(dev_srid))
-                        )
-                    else:
-                        type_clause = sql.SQL("postgis.geometry")
-
-                    tgt_cur.execute(
-                        sql.SQL("""
-                            ALTER TABLE {} 
-                            ALTER COLUMN {} TYPE {} 
-                            USING postgis.ST_GeomFromEWKB({}::bytea)
-                        """).format(
-                            _fq(schema, table),
-                            sql.Identifier(col_name),
-                            type_clause,
-                            sql.Identifier(col_name),
-                        )
+            def sample_fingerprint(conn) -> str:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT kcu.column_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        WHERE tc.constraint_type='PRIMARY KEY'
+                          AND tc.table_schema=%s AND tc.table_name=%s
+                        ORDER BY kcu.ordinal_position
+                        LIMIT 1
+                        """,
+                        (schema, table),
                     )
+                    row = cur.fetchone()
+                    order_col = row[0] if row else None
 
-            tgt.commit()
-        except Exception:
-            tgt.rollback()
-            raise
+                    if order_col:
+                        q = sql.SQL("SELECT * FROM {} ORDER BY {} LIMIT %s").format(
+                            _fq(schema, table), sql.Identifier(order_col)
+                        )
+                        cur.execute(q, (sample_rows,))
+                    else:
+                        q = sql.SQL("SELECT * FROM {} ORDER BY 1 LIMIT %s").format(_fq(schema, table))
+                        cur.execute(q, (sample_rows,))
+                    rows = cur.fetchall()
+
+                h = hashlib.sha256()
+                for r in rows:
+                    h.update(repr(r).encode("utf-8"))
+                return h.hexdigest()
+
+            src_n = count_rows(src)
+            tgt_n = count_rows(tgt)
+
+            out = {"schema": schema, "table": table, "source_rows": src_n, "target_rows": tgt_n, "ok": (src_n == tgt_n)}
+            if sample_hash:
+                out["source_sample_hash"] = sample_fingerprint(src)
+                out["target_sample_hash"] = sample_fingerprint(tgt)
+                out["sample_hash_ok"] = (out["source_sample_hash"] == out["target_sample_hash"])
+                out["ok"] = out["ok"] and out["sample_hash_ok"]
+            return out
         finally:
             self._put_src(src)
             self._put_tgt(tgt)
 
-    # --- Materialized views, indexes, PKs, UDFs, grants, partition parents ---
-    # For GitHub polish: keep them as methods, invoked by config flags.
-
-    def migrate_schema_full(self, schema: str) -> Dict[str, Any]:
-        """
-        Full orchestration: tables + (optional) partitions + indexes + matviews + PKs + UDFs + grants.
-        This mirrors your big script shape.
-        """
-        if schema in self.policy.exclude_schemas:
-            return {"schema": schema, "skipped": True, "reason": "excluded"}
-
-        tables = self.list_tables(schema)
-        tables = [
-            t for t in tables
-            if t not in self.policy.system_tables
-            and t not in self.policy.exclude_tables
-            and not any(t.endswith(suf) for suf in self.policy.exclude_suffixes)
-        ]
-
-        # V2: you can additionally detect partition children/parents and handle them specially
-        # (omitted here for brevity, but stubbed as a place to plug it in).
-        results = {"schema": schema, "tables": [], "matviews": [], "indexes": [], "pks": [], "udfs": []}
-
-        for t in tables:
-            self.copy_table(schema, t)
-            results["tables"].append(t)
-
-        # TODO: migrate user-defined indexes on tables
-        # TODO: migrate PK constraints
-        # TODO: migrate materialized views (create staging table -> MV -> MV indexes)
-        # TODO: migrate UDFs (postgis schema or configurable schemas)
-        # TODO: apply grants
-        return results
-
-
-# -----------------------------------------------------------------------------
-# V2 Entry Point
-# -----------------------------------------------------------------------------
 
 def execute_v2(cfg: Dict[str, Any], plan_path: Optional[str] = None, state_path: str = "state.json") -> None:
-    """
-    V2 can run in two modes:
-      - plan-driven: iterate plan steps
-      - schema-driven: if no plan, migrate schemas from config
-    """
     orch = MigrationOrchestrator(cfg)
     state_file = Path(state_path)
 
     state = _read_json(state_file) if state_file.exists() else {"completed": {}, "started_at": time.time()}
     completed = state.get("completed", {})
 
+    def mark(step_id: str, payload: Dict[str, Any]) -> None:
+        completed[step_id] = payload
+        state["completed"] = completed
+        state["updated_at"] = time.time()
+        _write_json(state_file, state)
+
     try:
-        if plan_path:
-            plan = _read_json(plan_path)
-            steps = plan.get("steps", [])
-            for step in steps:
-                step_id = step.get("id") or f"{step.get('schema')}.{step.get('table')}.{step.get('op')}"
-                if step_id in completed:
-                    print(f"↩️  Skipping {step_id}")
+        if not plan_path:
+            raise RuntimeError("V2 executor expects a plan.json (plan-driven).")
+
+        plan = _read_json(plan_path)
+        steps = plan.get("steps", [])
+        if not steps:
+            raise RuntimeError("plan.json has no steps.")
+
+        for step in steps:
+            step_id = step.get("id") or f"{step.get('schema')}.{step.get('table')}.{step.get('op')}"
+            if step_id in completed:
+                print(f"↩️  Skipping {step_id}")
+                continue
+
+            op = step.get("op")
+            t0 = time.time()
+            print(f"➡️  {op} ... {step.get('schema','')}.{step.get('table','')}".strip())
+
+            try:
+                if op == "ensure_schema":
+                    orch.ensure_schema(step["schema"])
+
+                elif op == "create_udfs":
+                    orch.create_udfs(step["schema"], step.get("udfs", []))
+
+                elif op == "ensure_table":
+                    orch.ensure_table_like_source(step["schema"], step["table"])
+
+                elif op == "copy_table":
+                    orch.copy_table(step["schema"], step["table"])
+
+                elif op == "sync_sequences":
+                    orch.sync_sequences(step["schema"], step["table"])
+
+                elif op == "create_indexes":
+                    orch.create_indexes(step["schema"], step["table"], step.get("indexes", []))
+
+                elif op == "add_fks":
+                    orch.add_fks(step["schema"], step.get("fks", []))
+
+                elif op == "create_matviews":
+                    orch.create_matviews(step["schema"], step.get("matviews", []))
+
+                elif op == "create_mv_indexes":
+                    orch.create_mv_indexes(step["schema"], step.get("indexes", []))
+
+                elif op == "verify_table":
+                    rep = orch.verify_table(step["schema"], step["table"], step.get("validate", {}) or {})
+                    if not rep.get("ok", False):
+                        raise RuntimeError(f"Verification failed: {rep}")
+                    mark(step_id, {"ok": True, "elapsed_s": round(time.time() - t0, 3), "verify": rep})
+                    print(f"✅ {op} OK in {round(time.time()-t0,3)}s")
                     continue
 
-                op = step.get("op")
-                if op == "copy_table":
-                    orch.copy_table(step["schema"], step["table"])
-                elif op == "migrate_schema_full":
-                    orch.migrate_schema_full(step["schema"])
                 else:
                     raise RuntimeError(f"Unknown op: {op}")
 
-                completed[step_id] = {"ok": True, "ts": time.time()}
-                state["completed"] = completed
-                state["updated_at"] = time.time()
-                _write_json(state_file, state)
+                mark(step_id, {"ok": True, "elapsed_s": round(time.time() - t0, 3)})
+                print(f"✅ {op} OK in {round(time.time()-t0,3)}s")
 
-        else:
-            schemas = cfg.get("migration", {}).get("include_schemas", [])
-            for schema in schemas:
-                step_id = f"schema_full:{schema}"
-                if step_id in completed:
-                    print(f"↩️  Skipping {step_id}")
-                    continue
-                orch.migrate_schema_full(schema)
-                completed[step_id] = {"ok": True, "ts": time.time()}
-                state["completed"] = completed
-                state["updated_at"] = time.time()
-                _write_json(state_file, state)
+            except Exception as e:
+                mark(step_id, {"ok": False, "elapsed_s": round(time.time() - t0, 3), "error": str(e)})
+                print(f"❌ {op} failed: {e}")
+                raise
 
     finally:
         orch.close()
