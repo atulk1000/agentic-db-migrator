@@ -185,7 +185,7 @@ Traditional migration scripts are:
 
 - Opaque in decision-making
 
-- This project explores a safer pattern:
+This project explores a safer pattern:
 
 - Let intelligence decide the plan.
 - Let deterministic systems execute it safely.
