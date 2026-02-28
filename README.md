@@ -103,7 +103,7 @@ Execution logic remains unchanged regardless of planner implementation.
 ### Prerequisites
 - Docker + Docker Compose
 - Python 3.10+
-
+0) Start Docker Desktop (needed so docker compose can talk to the engine) : Start using desktop app or by using command: Start-Process "$Env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 1) Start local Postgres instances
 2) Create and activate a virtual environment
 3) Install the package (editable)
