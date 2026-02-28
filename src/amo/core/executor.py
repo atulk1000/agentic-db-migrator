@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import json
 import time
 from pathlib import Path
@@ -52,6 +53,48 @@ def _count_rows(conn, schema: str, table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"SELECT COUNT(*) FROM {_fq(schema, table)};")
         return int(cur.fetchone()[0])
+
+_NEXTVAL_RE = re.compile(r"nextval\('([^']+)'\s*(?:::regclass)?\)", re.IGNORECASE)
+
+def _extract_nextval_seq_qnames(default_sql: Optional[str]) -> List[str]:
+    """
+    Returns list of sequence qualified names referenced by nextval('...').
+    Works for: nextval('schema.seq'::regclass) and nextval('schema.seq')
+    """
+    if not default_sql:
+        return []
+    return _NEXTVAL_RE.findall(default_sql)
+
+def _split_qname(qname: str, fallback_schema: str) -> tuple[str, str]:
+    """
+    Split schema-qualified name like analytics.events_event_id_seq.
+    If unqualified, assume fallback_schema.
+    Strips any double-quotes if present.
+    """
+    qname = qname.replace('"', "")
+    if "." in qname:
+        sch, name = qname.split(".", 1)
+        return sch, name
+    return fallback_schema, qname
+
+def _ensure_target_sequences_for_create(tgt_conn, seq_qnames: List[str], fallback_schema: str) -> None:
+    """
+    Creates any sequences referenced by nextval(...) defaults.
+    Must run before CREATE TABLE that references them.
+    """
+    if not seq_qnames:
+        return
+
+    with tgt_conn.cursor() as cur:
+        for qname in sorted(set(seq_qnames)):
+            sch, seq = _split_qname(qname, fallback_schema=fallback_schema)
+            # ensure schema exists for the sequence
+            cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(sch)))
+            cur.execute(
+                sql.SQL("CREATE SEQUENCE IF NOT EXISTS {}.{}").format(
+                    sql.Identifier(sch), sql.Identifier(seq)
+                )
+            )
 
 
 # -----------------------------
@@ -127,20 +170,7 @@ def _ensure_target_schema_and_table_like_source(
     schema: str,
     table: str,
 ) -> None:
-    """
-    Creates schema/table on target IF missing, using source definition.
-    - Does not modify existing target objects.
-    - Best-effort defaults + PK.
-    """
-    # Create schema if missing
-    if not _schema_exists(tgt_conn, schema):
-        with tgt_conn.cursor() as cur:
-            cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
-
-    # Create table if missing
-    if _table_exists(tgt_conn, schema, table):
-        return
-
+    ...
     cols = _fetch_source_columns(src_conn, schema, table)
     if not cols:
         raise RuntimeError(f"Source table {schema}.{table} has no columns (unexpected).")
@@ -148,10 +178,13 @@ def _ensure_target_schema_and_table_like_source(
     pk_cols = _fetch_source_primary_key(src_conn, schema, table)
 
     col_defs_sql = []
+    seq_qnames: List[str] = []
+
     for c in cols:
         parts = [sql.Identifier(c["name"]), sql.SQL(c["type_sql"])]
 
         if c["default_sql"]:
+            seq_qnames.extend(_extract_nextval_seq_qnames(c["default_sql"]))
             parts.append(sql.SQL("DEFAULT "))
             parts.append(sql.SQL(c["default_sql"]))
 
@@ -160,16 +193,7 @@ def _ensure_target_schema_and_table_like_source(
 
         col_defs_sql.append(sql.SQL(" ").join(parts))
 
-    constraints_sql = []
-    if pk_cols:
-        constraints_sql.append(
-            sql.SQL("PRIMARY KEY ({})").format(
-                sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols)
-            )
-        )
-
-    all_defs = col_defs_sql + constraints_sql
-
+    ...
     create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
         sql.Identifier(schema),
         sql.Identifier(table),
@@ -177,6 +201,8 @@ def _ensure_target_schema_and_table_like_source(
     )
 
     with tgt_conn.cursor() as cur:
+        # Create any referenced sequences BEFORE running CREATE TABLE
+        _ensure_target_sequences_for_create(tgt_conn, seq_qnames, fallback_schema=schema)
         cur.execute(create_stmt)
 
 
