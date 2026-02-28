@@ -4,7 +4,9 @@ app:
 engine:
   # default: copy (portable). optional: spark (scale)
   type: copy
-  auto_ddl: true 
+  auto_ddl: true
+  copy:
+    truncate_first: true
   
 
 source:
