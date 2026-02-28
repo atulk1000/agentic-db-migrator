@@ -394,7 +394,7 @@ class MigrationOrchestrator:
     def sync_sequences(self, schema: str, table: str) -> None:
         """
         Find nextval(...) defaults on target table and setval(seq, max(col)).
-        Safe across NULL defaults / identity columns / unexpected default formats.
+        Uses parameterized LIKE to avoid psycopg2 '%' placeholder issues.
         """
         tgt = self._tgt()
         try:
@@ -402,7 +402,6 @@ class MigrationOrchestrator:
             self.set_session_settings(tgt)
     
             with tgt.cursor() as cur:
-                # Filter defaults to only those that actually contain nextval(...)
                 cur.execute(
                     """
                     SELECT column_name, column_default
@@ -410,22 +409,14 @@ class MigrationOrchestrator:
                     WHERE table_schema=%s
                       AND table_name=%s
                       AND column_default IS NOT NULL
-                      AND column_default LIKE 'nextval(%'
+                      AND column_default LIKE %s
                     """,
-                    (schema, table),
+                    (schema, table, "nextval(%"),
                 )
                 rows = cur.fetchall()
     
-            for row in rows:
-                # Be defensive about shape
-                if not isinstance(row, (tuple, list)) or len(row) < 2:
-                    continue
-    
-                col, default = row[0], row[1]
-                if not default:
-                    continue
-    
-                m = _NEXTVAL_RE.search(default)
+            for col, default in rows:
+                m = _NEXTVAL_RE.search(default or "")
                 if not m:
                     continue
     
@@ -438,15 +429,15 @@ class MigrationOrchestrator:
                 else:
                     seq_schema, seq_name = schema, qname
     
-                # Compute max(col) and advance sequence
                 with tgt.cursor() as cur:
                     cur.execute(
                         sql.SQL("SELECT COALESCE(MAX({}), 0) FROM {}").format(
-                            sql.Identifier(col), _fq(schema, table)
+                            sql.Identifier(col),
+                            _fq(schema, table),
                         )
                     )
                     mx_row = cur.fetchone()
-                    mx = int(mx_row[0] or 0) if mx_row and len(mx_row) > 0 else 0
+                    mx = int(mx_row[0] or 0) if mx_row else 0
     
                     seq_regclass = f'"{seq_schema}"."{seq_name}"'
                     if mx <= 0:
@@ -454,7 +445,7 @@ class MigrationOrchestrator:
                     else:
                         cur.execute("SELECT setval(%s::regclass, %s, true)", (seq_regclass, mx))
         finally:
-            self._put_tgt(tgt)    
+            self._put_tgt(tgt)
 
     
 
