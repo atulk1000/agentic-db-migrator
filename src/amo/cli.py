@@ -53,11 +53,28 @@ def run(
     config: str = typer.Option("config.yaml", help="Path to config YAML"),
     plan: str = typer.Option("plan.json", help="Path to plan JSON"),
     state: str = typer.Option("state.json", help="Checkpoint state file"),
+    truncate_first: Optional[bool] = typer.Option(
+        None,
+        "--truncate/--no-truncate",
+        help="Truncate target tables before COPY (overrides engine.copy.truncate_first)",
+    ),
+    allow_destructive: Optional[bool] = typer.Option(
+        None,
+        "--allow-destructive/--no-allow-destructive",
+        help="Allow destructive ops like TRUNCATE (overrides engine.allow_destructive)",
+    ),
 ):
     from amo.core.executor import execute
 
     load_env(".env")
     cfg = load_config(config)
+
+    # ✅ apply CLI overrides
+    if truncate_first is not None:
+        cfg.setdefault("engine", {}).setdefault("copy", {})["truncate_first"] = bool(truncate_first)
+
+    if allow_destructive is not None:
+        cfg.setdefault("engine", {})["allow_destructive"] = bool(allow_destructive)
 
     execute(cfg=cfg, plan_path=plan, state_path=state)
     print(f"Run complete. State saved to {state}")
