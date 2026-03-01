@@ -103,6 +103,11 @@ Execution logic remains unchanged regardless of planner implementation.
 ### Prerequisites
 - Docker + Docker Compose
 - Python 3.10+
+# Optional: reset target DB for a clean demo run
+docker compose rm -sf target-db
+docker compose up -d target-db
+
+
 0) Start Docker Desktop (needed so docker compose can talk to the engine) : Start using desktop app or by using command: Start-Process "$Env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 1) Start local Postgres instances
 2) Create and activate a virtual environment
@@ -110,28 +115,28 @@ Execution logic remains unchanged regardless of planner implementation.
 4) Copy config templates
 5) Discover schema metadata (manifest)
 6) Generate an execution plan
-7) Run the migration
+7) Run the migration (state is auto-timestamped under runs/ by default)
 8) Verify the migration
 
 Below are power shell commands in sequence:   
 ```bash
-docker compose up -d
+1)docker compose up -d
 
-python -m venv .venv
+2)python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-pip install -e .
+3)pip install -e .
 
-cp config.example.yaml config.yaml
+4)cp config.example.yaml config.yaml
 cp .env.example .env
 
-amo discover --config config.yaml --out manifest.json
+5)amo discover --config config.yaml --out manifest.json
 
-amo plan --manifest manifest.json --planner heuristic --out plan.json
+6)amo plan --manifest manifest.json --planner heuristic --out plan.json
 
-amo run --config config.yaml --plan plan.json --state state.json
+7)amo run --config config.yaml --plan plan.json
 
-amo verify --config config.yaml --plan plan.json --out report.json
+8)amo verify --config config.yaml --plan plan.json --out report.json
 
 ```
 
