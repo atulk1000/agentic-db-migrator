@@ -103,7 +103,8 @@ Execution logic remains unchanged regardless of planner implementation.
 ### Prerequisites
 - Docker + Docker Compose
 - Python 3.10+
-# Optional: reset target DB for a clean demo run
+  
+Optional: reset target DB for a clean demo run
 docker compose rm -sf target-db
 docker compose up -d target-db
 
