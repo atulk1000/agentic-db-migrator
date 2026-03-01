@@ -1,6 +1,7 @@
 import typer
 from amo.core.config import load_env, load_config
 from amo.core.manifest_builder import build_manifest, write_manifest
+from typing import Optional
 
 app = typer.Typer()
 
