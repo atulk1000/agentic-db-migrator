@@ -372,8 +372,8 @@ class MigrationOrchestrator:
     
             with tgt.cursor() as cur:
                 if self.truncate_first:
-                    cur.execute(sql.SQL("TRUNCATE TABLE {}").format(_fq(schema, table)))
-    
+                    cur.execute(sql.SQL("TRUNCATE TABLE {} CASCADE").format(_fq(schema, table)))
+            
             copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
             copy_in  = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
     
