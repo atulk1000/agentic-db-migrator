@@ -2,6 +2,8 @@ import typer
 from amo.core.config import load_env, load_config
 from amo.core.manifest_builder import build_manifest, write_manifest
 from typing import Optional
+from datetime import datetime
+from pathlib import Path
 
 app = typer.Typer()
 
@@ -53,7 +55,16 @@ def plan(
 def run(
     config: str = typer.Option("config.yaml", help="Path to config YAML"),
     plan: str = typer.Option("plan.json", help="Path to plan JSON"),
-    state: str = typer.Option("state.json", help="Checkpoint state file"),
+    state: Optional[str] = typer.Option(
+        None,
+        "--state",
+        help="Checkpoint state file. If omitted, a timestamped file is created under runs/.",
+    ),
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help="Start a fresh run (ignore existing state file if provided).",
+    ),
     truncate_first: Optional[bool] = typer.Option(
         None,
         "--truncate/--no-truncate",
@@ -77,9 +88,17 @@ def run(
     if allow_destructive is not None:
         cfg.setdefault("engine", {})["allow_destructive"] = bool(allow_destructive)
 
+    # ✅ default state path = timestamped per run
+    if state is None:
+        Path("runs").mkdir(exist_ok=True)
+        state = f"runs/state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    # ✅ fresh run: delete existing state file if any
+    if fresh and Path(state).exists():
+        Path(state).unlink()
+
     execute(cfg=cfg, plan_path=plan, state_path=state)
     print(f"Run complete. State saved to {state}")
-
 
 @app.command()
 def verify(
