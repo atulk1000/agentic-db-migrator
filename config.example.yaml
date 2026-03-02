@@ -25,9 +25,10 @@ target:
   password: ${DST_PASSWORD}
 
 migration:
-  include_schemas:
-    - demo
-    - analytics
+  include_schemas: []     # empty means “all non-system schemas”
+  exclude_schemas:
+    - pg_catalog
+    - information_schema
 
   exclude_schemas:
     - pg_catalog
