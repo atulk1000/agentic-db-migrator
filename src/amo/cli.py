@@ -18,37 +18,31 @@ def discover(
     write_manifest(manifest, out)
     print(f"Wrote manifest to {out} ({len(manifest.get('tables', []))} tables, {len(manifest.get('errors', []))} errors)")
 
-
 @app.command()
 def plan(
     manifest: str = typer.Option("manifest.json", help="Input manifest path"),
     planner: str = typer.Option("heuristic", help="Planner to use: heuristic | openai | ollama"),
     out: str = typer.Option("plan.json", help="Output plan path"),
 ):
-    if planner == "heuristic":
-        from amo.core.heuristic_planner import generate_plan, write_plan
-        plan_obj = generate_plan(manifest_path=manifest)
-        write_plan(plan_obj, out)
-        print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
-        return
+    planner_modules = {
+        "heuristic": "amo.core.planners.heuristic",
+        "openai": "amo.core.planners.openai_stub",
+        "ollama": "amo.core.planners.ollama_stub",
+    }
 
-    if planner == "openai":
-        from amo.planners.openai_stub import generate_plan as llm_generate
-        plan_obj = llm_generate(manifest_path=manifest)
-        from amo.core.heuristic_planner import write_plan
-        write_plan(plan_obj, out)
-        print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
-        return
+    mod_path = planner_modules.get(planner)
+    if not mod_path:
+        raise typer.BadParameter(f"Unknown planner: {planner}. Use heuristic|openai|ollama")
 
-    if planner == "ollama":
-        from amo.planners.ollama_stub import generate_plan as llm_generate
-        plan_obj = llm_generate(manifest_path=manifest)
-        from amo.core.heuristic_planner import write_plan
-        write_plan(plan_obj, out)
-        print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
-        return
+    # Each planner module should expose: generate_plan(manifest_path: str) -> dict
+    mod = __import__(mod_path, fromlist=["generate_plan"])
+    plan_obj = mod.generate_plan(manifest_path=manifest)
 
-    raise typer.BadParameter(f"Unknown planner: {planner}. Use heuristic|openai|ollama")
+    # Keep write_plan in one place (I assume heuristic owns the JSON shape)
+    from amo.core.planners.heuristic import write_plan
+    write_plan(plan_obj, out)
+
+    print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
 
 
 @app.command()
