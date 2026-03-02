@@ -30,18 +30,16 @@ migration:
     - pg_catalog
     - information_schema
 
-  exclude_schemas:
-    - pg_catalog
-    - information_schema
+exclude_schemas:
+  - pg_catalog
+  - information_schema
 
-  exclude_tables:
-    - spatial_ref_sys
-    - geometry_columns
-    - geography_columns
+exclude_tables:
+  - spatial_ref_sys
+  - geometry_columns
+  - geography_columns
 
-  exclude_suffixes:
-    - _archive
-    - _table
+exclude_suffixes: []     # optional; project-specific
 
 planning:
   planner: heuristic
