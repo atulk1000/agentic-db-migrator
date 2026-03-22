@@ -266,6 +266,55 @@ class MigrationOrchestrator:
         )
         return [r[0] for r in rows]
 
+    def _fetch_source_partition_parent(self, src_conn, schema: str, table: str) -> Optional[Tuple[str, str]]:
+        rows = self._fetch(
+            src_conn,
+            """
+            SELECT pn.nspname, parent.relname
+            FROM pg_inherits i
+            JOIN pg_class child ON child.oid = i.inhrelid
+            JOIN pg_namespace cn ON cn.oid = child.relnamespace
+            JOIN pg_class parent ON parent.oid = i.inhparent
+            JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+            WHERE cn.nspname = %s
+              AND child.relname = %s
+            ORDER BY pn.nspname, parent.relname
+            LIMIT 1
+            """,
+            (schema, table),
+        )
+        return (rows[0][0], rows[0][1]) if rows else None
+
+    def _fetch_source_partition_key(self, src_conn, schema: str, table: str) -> Optional[str]:
+        rows = self._fetch(
+            src_conn,
+            """
+            SELECT pg_get_partkeydef(c.oid)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND c.relkind = 'p'
+            """,
+            (schema, table),
+        )
+        return rows[0][0] if rows else None
+
+    def _fetch_source_partition_bound(self, src_conn, schema: str, table: str) -> Optional[str]:
+        rows = self._fetch(
+            src_conn,
+            """
+            SELECT pg_get_expr(c.relpartbound, c.oid)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND c.relispartition
+            """,
+            (schema, table),
+        )
+        return rows[0][0] if rows else None
+
     def _ensure_sequences_for_defaults(self, tgt_conn, schema_fallback: str, default_sqls: List[str]) -> None:
         seq_qnames: List[str] = []
         for d in default_sqls:
@@ -307,11 +356,30 @@ class MigrationOrchestrator:
             if self.table_exists(tgt, schema, table):
                 return
 
+            partition_parent = self._fetch_source_partition_parent(src, schema, table)
+            if partition_parent:
+                parent_schema, parent_table = partition_parent
+                partition_bound = self._fetch_source_partition_bound(src, schema, table)
+                if not partition_bound:
+                    raise RuntimeError(f"Source partition {schema}.{table} is missing a partition bound")
+                self.ensure_schema(parent_schema)
+                self.ensure_table_like_source(parent_schema, parent_table)
+                with tgt.cursor() as cur:
+                    cur.execute(
+                        sql.SQL("CREATE TABLE IF NOT EXISTS {} PARTITION OF {} {}").format(
+                            _fq(schema, table),
+                            _fq(parent_schema, parent_table),
+                            sql.SQL(partition_bound),
+                        )
+                    )
+                return
+
             cols = self._fetch_source_columns_for_ddl(src, schema, table)
             if not cols:
                 raise RuntimeError(f"Source table {schema}.{table} has no columns")
 
             pk_cols = self._fetch_source_primary_key(src, schema, table)
+            partition_key = self._fetch_source_partition_key(src, schema, table)
 
             # Create sequences referenced by DEFAULT nextval(...) before CREATE TABLE
             self._ensure_sequences_for_defaults(
@@ -344,11 +412,19 @@ class MigrationOrchestrator:
                     sql.SQL("PRIMARY KEY ({})").format(sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols))
                 )
 
-            create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
-                sql.Identifier(schema),
-                sql.Identifier(table),
-                sql.SQL(", ").join(col_defs + constraints),
-            )
+            if partition_key:
+                create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) PARTITION BY {};").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                    sql.SQL(", ").join(col_defs + constraints),
+                    sql.SQL(partition_key),
+                )
+            else:
+                create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({});").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                    sql.SQL(", ").join(col_defs + constraints),
+                )
 
             with tgt.cursor() as cur:
                 cur.execute(create_stmt)
@@ -402,8 +478,7 @@ class MigrationOrchestrator:
  
     def sync_sequences(self, schema: str, table: str) -> None:
         """
-        Find nextval(...) defaults on target table and setval(seq, max(col)).
-        Uses parameterized LIKE to avoid psycopg2 '%' placeholder issues.
+        Sync serial and identity-backed sequences to the current max value.
         """
         tgt = self._tgt()
         try:
@@ -413,30 +488,44 @@ class MigrationOrchestrator:
             with tgt.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT column_name, column_default
+                    SELECT column_name, column_default, is_identity
                     FROM information_schema.columns
                     WHERE table_schema=%s
                       AND table_name=%s
-                      AND column_default IS NOT NULL
-                      AND column_default LIKE %s
+                      AND (
+                        (column_default IS NOT NULL AND column_default LIKE %s)
+                        OR is_identity = 'YES'
+                      )
                     """,
                     (schema, table, "nextval(%"),
                 )
                 rows = cur.fetchall()
-    
-            for col, default in rows:
-                m = _NEXTVAL_RE.search(default or "")
-                if not m:
-                    continue
-    
-                qname = (m.group(1) or "").replace('"', "").strip()
-                if not qname:
-                    continue
-    
-                if "." in qname:
-                    seq_schema, seq_name = qname.split(".", 1)
-                else:
-                    seq_schema, seq_name = schema, qname
+
+            for col, default, is_identity in rows:
+                seq_regclass: Optional[str] = None
+                if is_identity == "YES":
+                    with tgt.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_get_serial_sequence(%s, %s)",
+                            (f'"{schema}"."{table}"', col),
+                        )
+                        seq_row = cur.fetchone()
+                        seq_regclass = seq_row[0] if seq_row else None
+
+                if not seq_regclass:
+                    m = _NEXTVAL_RE.search(default or "")
+                    if not m:
+                        continue
+
+                    qname = (m.group(1) or "").replace('"', "").strip()
+                    if not qname:
+                        continue
+
+                    if "." in qname:
+                        seq_schema, seq_name = qname.split(".", 1)
+                    else:
+                        seq_schema, seq_name = schema, qname
+                    seq_regclass = f'"{seq_schema}"."{seq_name}"'
     
                 with tgt.cursor() as cur:
                     cur.execute(
@@ -448,7 +537,6 @@ class MigrationOrchestrator:
                     mx_row = cur.fetchone()
                     mx = int(mx_row[0] or 0) if mx_row else 0
     
-                    seq_regclass = f'"{seq_schema}"."{seq_name}"'
                     if mx <= 0:
                         cur.execute("SELECT setval(%s::regclass, 1, false)", (seq_regclass,))
                     else:

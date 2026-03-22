@@ -1,6 +1,7 @@
 import typer
 from amo.core.config import load_env, load_config
 from amo.core.manifest_builder import build_manifest, write_manifest
+from amo.core.planners.models import validate_plan_document
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
@@ -25,9 +26,9 @@ def plan(
     out: str = typer.Option("plan.json", help="Output plan path"),
 ):
     planner_modules = {
-        "heuristic": "amo.core.planners.heuristic",
-        "openai": "amo.core.planners.openai_stub",
-        "ollama": "amo.core.planners.ollama_stub",
+        "heuristic": "amo.core.planners.heuristic_planner",
+        "openai": "amo.core.planners.openai",
+        "ollama": "amo.core.planners.ollama",
     }
 
     mod_path = planner_modules.get(planner)
@@ -36,10 +37,10 @@ def plan(
 
     # Each planner module should expose: generate_plan(manifest_path: str) -> dict
     mod = __import__(mod_path, fromlist=["generate_plan"])
-    plan_obj = mod.generate_plan(manifest_path=manifest)
+    plan_obj = validate_plan_document(mod.generate_plan(manifest_path=manifest))
 
     # Keep write_plan in one place (I assume heuristic owns the JSON shape)
-    from amo.core.planners.heuristic import write_plan
+    from amo.core.planners.heuristic_planner import write_plan
     write_plan(plan_obj, out)
 
     print(f"Wrote plan to {out} ({len(plan_obj.get('steps', []))} steps)")
