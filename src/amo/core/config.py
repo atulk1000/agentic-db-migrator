@@ -50,6 +50,13 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
     if not p.exists():
         raise FileNotFoundError(f"Config file not found: {p}")
 
-    raw = yaml.safe_load(p.read_text()) or {}
+    try:
+        raw_text = p.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Config file {p} is not valid UTF-8. Re-save it as UTF-8 and try again."
+        ) from exc
+
+    raw = yaml.safe_load(raw_text) or {}
     return _substitute_env_vars(raw)
 
