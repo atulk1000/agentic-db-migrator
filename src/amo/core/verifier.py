@@ -78,15 +78,14 @@ def verify_plan(cfg: Dict[str, Any], plan_path: str) -> Dict[str, Any]:
 
     results = []
     ok_all = True
+    verify_steps = [step for step in steps if step.get("op") == "verify_table"]
+    candidate_steps = verify_steps or [step for step in steps if step.get("op") == "copy_table"]
 
     with psycopg2.connect(src_dsn) as src_conn, psycopg2.connect(tgt_dsn) as tgt_conn:
         src_conn.autocommit = True
         tgt_conn.autocommit = True
 
-        for step in steps:
-            if step.get("op") not in ("copy_table", "verify_table"):
-                continue
-
+        for step in candidate_steps:
             schema = step["schema"]
             table = step["table"]
             validate = step.get("validate", {}) or {}

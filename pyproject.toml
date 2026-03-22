@@ -18,5 +18,8 @@ dependencies = [
     "rich"
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 amo = "amo.cli:app"
