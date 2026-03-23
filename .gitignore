@@ -8,3 +8,5 @@ manifest.json
 plan.json
 state.json
 report.json
+runs/
+src/agentic_db_migrator.egg-info/

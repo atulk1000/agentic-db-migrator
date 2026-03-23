@@ -755,7 +755,12 @@ class MigrationOrchestrator:
             self._put_tgt(tgt)
 
 
-def execute(cfg: Dict[str, Any], plan_path: Optional[str] = None, state_path: str = "state.json") -> None:
+def execute(
+    cfg: Dict[str, Any],
+    plan_path: Optional[str] = None,
+    state_path: str = "state.json",
+    plan_obj: Optional[Dict[str, Any]] = None,
+) -> None:
     orch = MigrationOrchestrator(cfg)
     state_file = Path(state_path)
 
@@ -769,10 +774,10 @@ def execute(cfg: Dict[str, Any], plan_path: Optional[str] = None, state_path: st
         _write_json(state_file, state)
 
     try:
-        if not plan_path:
+        if plan_obj is None and not plan_path:
             raise RuntimeError("V2 executor expects a plan.json (plan-driven).")
 
-        plan = _read_json(plan_path)
+        plan = plan_obj if plan_obj is not None else _read_json(plan_path)
         steps = plan.get("steps", [])
         if not steps:
             raise RuntimeError("plan.json has no steps.")

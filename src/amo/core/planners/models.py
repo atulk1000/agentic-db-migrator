@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SourceRef(BaseModel):
@@ -118,7 +118,7 @@ PlanOp = Literal[
 
 
 class PlanStep(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     op: PlanOp
@@ -134,14 +134,44 @@ class PlanStep(BaseModel):
     matviews: List[MaterializedViewInfo] = Field(default_factory=list)
     udfs: List[UdfInfo] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_step_shape(self) -> "PlanStep":
+        table_required_ops = {
+            "ensure_table",
+            "copy_table",
+            "sync_sequences",
+            "create_indexes",
+            "verify_table",
+        }
+
+        if self.op in table_required_ops and not self.table:
+            raise ValueError(f"{self.op} requires a table value")
+
+        if self.op == "verify_table" and "rowcount" not in self.validation:
+            raise ValueError("verify_table requires validate.rowcount")
+
+        if self.op == "add_fks" and not self.fks:
+            raise ValueError("add_fks requires at least one foreign key entry")
+
+        if self.op == "create_udfs" and not self.udfs:
+            raise ValueError("create_udfs requires at least one udf")
+
+        if self.op == "create_matviews" and not self.matviews:
+            raise ValueError("create_matviews requires at least one materialized view")
+
+        return self
+
 
 class MigrationPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     version: str = "v2"
     generated_at: Optional[str] = None
     planner: str
     strategy: str
     source: SourceRef = Field(default_factory=SourceRef)
     steps: List[PlanStep] = Field(default_factory=list)
+    planner_metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 def load_manifest_document(path: str | Path) -> MigrationManifest:

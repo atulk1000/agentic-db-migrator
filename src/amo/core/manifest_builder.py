@@ -50,6 +50,20 @@ def _get_tables_in_schema(cur, schema: str) -> List[str]:
     return [r[0] for r in rows]
 
 
+def _get_candidate_schemas(cur) -> List[str]:
+    rows = _fetchall(
+        cur,
+        """
+        SELECT schema_name
+        FROM information_schema.schemata
+        WHERE schema_name !~ '^pg_'
+          AND schema_name <> 'information_schema'
+        ORDER BY schema_name
+        """,
+    )
+    return [r[0] for r in rows]
+
+
 def _get_table_relkind(cur, schema: str, table: str) -> Optional[str]:
     cur.execute(
         """
@@ -362,7 +376,7 @@ def _get_udfs(cur, schema: str) -> List[Dict[str, Any]]:
     return [{"schema": r[0], "name": r[1], "create_statement": r[2]} for r in rows]
 
 
-def build_manifest(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any]:
     migration_cfg = cfg.get("migration", {})
     include_schemas: List[str] = migration_cfg.get("include_schemas", [])
     exclude_schemas: List[str] = migration_cfg.get("exclude_schemas", [])
@@ -370,8 +384,8 @@ def build_manifest(cfg: Dict[str, Any]) -> Dict[str, Any]:
     exclude_suffixes: List[str] = migration_cfg.get("exclude_suffixes", [])
     system_tables = set(migration_cfg.get("system_tables", list(DEFAULT_SYSTEM_TABLES)))
 
-    src_cfg = cfg["source"]
-    dsn = _dsn_from_cfg(src_cfg)
+    db_cfg = cfg[db_key]
+    dsn = _dsn_from_cfg(db_cfg)
 
     discovered_tables: List[Dict[str, Any]] = []
     discovered_matviews: List[Dict[str, Any]] = []
@@ -382,6 +396,12 @@ def build_manifest(cfg: Dict[str, Any]) -> Dict[str, Any]:
     with psycopg2.connect(dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
+            if not include_schemas:
+                include_schemas = [
+                    schema for schema in _get_candidate_schemas(cur)
+                    if schema not in exclude_schemas
+                ]
+
             for schema in include_schemas:
                 if schema in exclude_schemas:
                     continue
@@ -441,10 +461,11 @@ def build_manifest(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "version": "v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": {
-            "host": src_cfg.get("host"),
-            "port": src_cfg.get("port"),
-            "database": src_cfg.get("database"),
+            "host": db_cfg.get("host"),
+            "port": db_cfg.get("port"),
+            "database": db_cfg.get("database"),
         },
+        "database_role": db_key,
         "include_schemas": include_schemas,
         "tables": discovered_tables,
         "matviews": discovered_matviews,
