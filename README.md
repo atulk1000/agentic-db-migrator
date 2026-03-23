@@ -1,198 +1,289 @@
-# 🚀 Agentic DB Migration Orchestrator
+# Agentic DB Migration Orchestrator
 
-An **AI-driven database migration orchestrator** that reads and inspects live schema metadata, generates an execution plan (ordering, partitioning, batching, validations), and executes migrations deterministically with safety guardrails and verification.
+An approval-gated database migration orchestrator for PostgreSQL. It inspects source and target databases, computes deterministic drift, generates a structured migration plan, lets a human review and approve that plan, then executes only the approved actions with checkpointing and verification.
 
-Instead of hardcoding migration logic, this framework allows an intelligent planner to decide *how* the migration should run — while enforcing strict policy controls and resumable execution.
+The key design choice is simple:
 
----
+- the planner recommends
+- the executor enforces
 
-## 🧠 What Makes It Agentic?
+That means you can use a heuristic planner today and swap in a real LLM-backed planner later without changing the safety boundary.
 
-The system reads source database metadata and allows an agent to:
+## Default Workflow
 
-- Decide migration ordering across schemas and tables  
-- Select partitioning and batching strategies per table  
-- Detect special cases (large tables, partitions, geometry columns, materialized views)  
-- Choose validation checks to run post-migration  
-- Flag risk conditions before execution  
+The primary workflow is now:
 
-The generated execution plan is structured, validated against policy constraints, and then executed deterministically.
+1. `analyze`
+2. `review`
+3. `approve`
+4. `run`
+5. `summarize-post`
 
-> The agent generates the migration execution plan.  
-> The engine enforces policy and executes it safely.
+This is the recommended path for both heuristic and LLM planning because it separates read-only analysis from execution.
 
----
+### What Each Step Does
 
-## 🏗 Architecture
+- `analyze`
+  - discovers both source and target
+  - writes `source_manifest.json` and `target_manifest.json`
+  - computes `manifest_diff.json`
+  - generates `plan.json`
+  - produces `pre_migration_summary.json` and a readable summary file
+- `review`
+  - prints the pre-migration summary for human review
+- `approve`
+  - creates an `approval.json` artifact with the approved migration mode, table scope, and destructive-policy choices
+- `run`
+  - executes only the approved subset of the plan
+- `summarize-post`
+  - produces a final post-migration summary from execution state and verification output
 
-### 1️⃣ Discover  
-Inspects the source database and builds a structured `MigrationManifest` including:
+## Why This Is Better Than Direct Execute
 
-- Schemas and tables  
-- Estimated row counts  
-- Partition metadata  
-- Geometry columns  
-- Materialized views  
+The older low-level commands are still available, but the new workflow is better for production because it adds:
 
-### 2️⃣ Plan  
-An agent generates a `MigrationPlan` that defines:
+- source vs target drift analysis before transfer
+- pre-migration warnings and manual-review routing
+- explicit migration modes
+- human approval before mutation
+- auditable approval artifacts
+- post-migration reporting
 
-- Table migration order  
-- Parallelism and partitioning strategy  
-- Batch sizes  
-- Validation rules  
-- Object dependency sequencing  
+## Planner Capabilities
 
-### 3️⃣ Execute  
-The execution engine:
+The planning layer can support:
 
-- Applies migration steps deterministically  
-- Supports checkpoint/resume  
-- Handles partitioned tables and geometry columns  
-- Rebuilds dependent objects  
+- table ordering beyond simple size sorting
+- transfer strategy selection
+- chunking-column selection
+- chunk count and concurrency hints
+- verification depth selection
+- risk scoring
+- preflight warnings
+- manual-review routing
+- pre-migration summary generation
+- post-migration summary generation
 
-### 4️⃣ Verify  
-Post-migration validation produces a structured report including:
+Today, the deterministic analysis layer already computes much of that from manifests and diffs. A real LLM-backed planner can later replace or augment those recommendations while still emitting the same structured plan schema.
 
-- Rowcount parity checks  
-- Optional sampling/hash checks  
-- Success/failure summary  
+## Planner Backends
 
----
+The CLI accepts:
 
-## 🛡 Safety Design
+- `heuristic`
+- `demo`
+- `gemini`
+- `openai`
+- `ollama`
 
-This system is **AI-assisted, not AI-autonomous**.
+Current behavior:
 
-- All plans are validated against an allowlisted policy  
-- Destructive operations require explicit flags  
-- Partition and concurrency caps are enforced  
-- The executor never runs arbitrary SQL from model text  
-- Structured schemas (Pydantic models) define all plan contracts  
+- `heuristic` is real and deterministic
+- `demo` can call a hosted planner endpoint that you control, and otherwise falls back to the heuristic planner
+- `gemini` can call the Gemini API when `GEMINI_API_KEY` is configured, and otherwise falls back to the heuristic planner
+- `openai` is kept as a demo adapter and still falls back to local heuristic planning
+- `ollama` currently falls back to local heuristic planning
 
-This ensures intelligent planning without unsafe execution.
+Important notes:
 
----
+- `demo` is only for low-friction public demos; it assumes you host a planner service and keep the real LLM credentials server-side
+- for normal LLM-based planning, each user should provide their own API key or local model runtime
+- `openai` requires your own OpenAI API key and OpenAI API billing once a real adapter is wired in
+- ChatGPT Plus does not include OpenAI API credits
+- `gemini` is the easiest direct hosted planner path when each user brings their own key
 
-## ✨ Core Features
+All live LLM-backed planners are expected to go through the same safety gate:
 
-- 🔍 Automatic schema discovery  
-- 🧠 AI-generated execution planning (model-agnostic)  
-- 🛡 Policy enforcement and guardrails  
-- ⚙ Spark + JDBC deterministic execution  
-- ♻ Checkpoint and resume support  
-- 📊 Post-migration verification report  
-- 🧩 Extensible step-handler architecture  
+- provider-specific API call
+- shared normalization and repair of common model mistakes
+- strict plan validation
+- heuristic fallback if the output is still invalid
 
----
-
-## 🔌 Model-Agnostic Design
-
-The planner is implemented via an adapter interface:
-
-- `heuristic` planner (default, deterministic)  
-- `openai` planner (optional adapter)  
-- `ollama` planner (optional adapter)  
-
-Execution logic remains unchanged regardless of planner implementation.
-
----
-
-## 🚀 Quickstart (Local Demo)
+## Quickstart
 
 ### Prerequisites
-- Docker + Docker Compose
+
+- Docker Desktop
+- Docker Compose
 - Python 3.10+
-  
-Optional: reset target DB for a clean demo run
-docker compose rm -sf target-db
-docker compose up -d target-db
 
+### Local Setup
 
-0) Start Docker Desktop (needed so docker compose can talk to the engine) : Start using desktop app or by using command: Start-Process "$Env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-1) Start local Postgres instances
-2) Create and activate a virtual environment
-3) Install the package (editable)
-4) Copy config templates
-5) Discover schema metadata (manifest)
-6) Generate an execution plan
-7) Run the migration (state is auto-timestamped under runs/ by default)
-8) Verify the migration
+```powershell
+docker compose up -d
 
-Below are power shell commands in sequence:   
-```bash
-1)docker compose up -d
-
-2)python -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-3)pip install -e .
+pip install -e .
 
-4)cp config.example.yaml config.yaml
-cp .env.example .env
-
-5)amo discover --config config.yaml --out manifest.json
-
-6)amo plan --manifest manifest.json --planner heuristic --out plan.json
-
-7)amo run --config config.yaml --plan plan.json
-
-8)amo verify --config config.yaml --plan plan.json --out report.json
-
+Copy-Item config.example.yaml config.yaml
+Copy-Item .env.example .env
 ```
 
----
-## 📦 Project Structure
+If you want to try the hosted demo endpoint path, set:
+
+```powershell
+$env:DEMO_PLANNER_URL="https://your-demo-planner.example.com/plan"
+```
+
+This path is intended only for demos. In normal usage, a user should configure their own provider credentials.
+
+If you want to try the direct Gemini planner path locally with your own key, set:
+
+```powershell
+$env:GEMINI_API_KEY="your-key-here"
+```
+
+### Recommended Approval-Gated Flow
+
+```powershell
+python -m amo.cli analyze --config config.yaml --planner demo --out-dir runs\analysis_demo
+python -m amo.cli review --summary runs\analysis_demo\pre_migration_summary.json
+python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --out runs\analysis_demo\approval.json
+python -m amo.cli run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json
+python -m amo.cli summarize-post --plan runs\analysis_demo\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_demo\pre_migration_summary.json --out runs\analysis_demo\post_migration_summary.json
+```
+
+### Recommended Local LLM Flow
+
+If you want to run the planner directly with your own hosted-model key, use `gemini` instead of `demo`:
+
+```powershell
+python -m amo.cli analyze --config config.yaml --planner gemini --out-dir runs\analysis_gemini
+python -m amo.cli review --summary runs\analysis_gemini\pre_migration_summary.json
+python -m amo.cli approve --plan runs\analysis_gemini\plan.json --summary runs\analysis_gemini\pre_migration_summary.json --mode safe_sync --out runs\analysis_gemini\approval.json
+python -m amo.cli run --config config.yaml --plan runs\analysis_gemini\plan.json --approval runs\analysis_gemini\approval.json
+python -m amo.cli summarize-post --plan runs\analysis_gemini\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_gemini\pre_migration_summary.json --out runs\analysis_gemini\post_migration_summary.json
+```
+
+Expected request shape for a hosted demo planner:
+
+```json
+{
+  "manifest": { "...": "the full source manifest" },
+  "requested_planner": "demo",
+  "requested_provider": "gemini"
+}
+```
+
+The endpoint may return either:
+
+```json
+{ "plan": { "...": "full migration plan" } }
+```
+
+or the plan object directly. The plan must still satisfy the repo's validated plan schema.
+
+### Low-Level Commands
+
+These still exist for debugging and development:
+
+```powershell
+python -m amo.cli discover --config config.yaml --database source --out source_manifest.json
+python -m amo.cli discover --config config.yaml --database target --out target_manifest.json
+python -m amo.cli plan --manifest source_manifest.json --planner heuristic --out plan.json
+python -m amo.cli run --config config.yaml --plan plan.json
+python -m amo.cli verify --config config.yaml --plan plan.json --out report.json
+```
+
+## Migration Modes
+
+The approval artifact supports these modes:
+
+- `full_refresh`
+- `missing_only`
+- `metadata_diff_only`
+- `data_diff_only`
+- `safe_sync`
+- `plan_only`
+
+`plan_only` is analysis-only and cannot be executed.
+
+## Artifacts
+
+The new workflow writes a reusable set of artifacts:
+
+- `source_manifest.json`
+- `target_manifest.json`
+- `manifest_diff.json`
+- `plan.json`
+- `pre_migration_summary.json`
+- `approval.json`
+- `state.json` or timestamped state files
+- `report.json`
+- `post_migration_summary.json`
+
+These make the process auditable and resumable.
+
+## Safety Model
+
+This project is AI-assisted, not AI-autonomous.
+
+- plans are validated against strict schemas
+- execution uses allowlisted operations
+- destructive actions require explicit approval
+- approval can scope execution to specific tables
+- manual-review items are surfaced before execution
+- the executor never runs arbitrary free-form model SQL
+
+## Current Scope
+
+The current implementation is strongest as a Postgres-to-Postgres migration orchestrator with support for:
+
+- schema discovery
+- tables and partition awareness
+- indexes and foreign keys
+- materialized views
+- UDF recreation
+- resumable execution
+- rowcount and optional sample-hash verification
+
+## Testing
+
+Run the local checks with:
+
+```powershell
+python -m compileall src tests
+python -m pytest -q
+```
+
+## Project Structure
 
 ```text
 src/amo/
+  cli.py
   core/
-    manifest_builder.py
-    heuristic_planner.py
+    analysis.py
+    config.py
     executor.py
+    manifest_builder.py
     verifier.py
-    policy.py
-  migration/
-    transfer.py
-    introspect.py
-    geometry.py
-    matviews.py
-    indexes.py
-    keys.py
-    grants.py
-  planners/
-    openai_stub.py
-    ollama_stub.py
+    workflow_models.py
+    planners/
+      gemini.py
+      heuristic_planner.py
+      llm_common.py
+      llm_stub.py
+      models.py
+      ollama.py
+      openai.py
+      remote_demo.py
+tests/
+  test_analysis.py
+  test_cli_plan.py
+  test_cli_workflow.py
+  test_gemini_planner.py
+  test_heuristic_planner.py
+  test_remote_demo_planner.py
+  test_verifier.py
 ```
 
----
-## 🧭 Roadmap
+## Roadmap
 
-- Full LLM-based planning adapter
-
-- Intelligent risk scoring for large environments
-
-- Cost-aware execution strategy optimization
-
-- Cross-database engine support
-
-- Advanced validation (distribution drift, checksum comparison)
-
----
-## 🎯 Motivation
-
-Traditional migration scripts are:
-
-- Hardcoded
-
-- Environment-specific
-
-- Fragile under scale
-
-- Opaque in decision-making
-
-This project explores a safer pattern:
-
-- Let intelligence decide the plan.
-- Let deterministic systems execute it safely.
-- Let verification prove correctness
+- replace the `openai` fallback with a true structured OpenAI planner
+- harden the hosted demo planner with retries, repair, and better telemetry
+- expand diffing and verification depth
+- add richer risk scoring and transfer optimization
+- add evals for planner quality and fallback rate
+- extract dialect adapters for additional databases

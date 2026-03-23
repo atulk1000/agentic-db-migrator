@@ -4,11 +4,11 @@ from amo.core.planners.heuristic_planner import generate_plan as generate_heuris
 from amo.core.planners.models import validate_plan_document
 
 
-def generate_fallback_plan(manifest_path: str, planner_name: str) -> dict:
+def generate_fallback_plan(manifest_path: str, planner_name: str, reason: str | None = None) -> dict:
     plan = generate_heuristic_plan(manifest_path=manifest_path)
     plan["planner"] = planner_name
     plan["planner_metadata"] = {
         "mode": "heuristic_fallback",
-        "reason": "LLM adapter is not configured yet.",
+        "reason": reason or "LLM adapter is not configured yet.",
     }
     return validate_plan_document(plan)

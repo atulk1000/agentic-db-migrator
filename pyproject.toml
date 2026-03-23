@@ -15,7 +15,8 @@ dependencies = [
     "pyyaml",
     "typer",
     "python-dotenv",
-    "rich"
+    "rich",
+    "google-genai"
 ]
 
 [project.optional-dependencies]

@@ -55,7 +55,7 @@ def test_cli_plan_supports_all_advertised_planners(tmp_path):
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
 
-    for planner_name in ("heuristic", "openai", "ollama"):
+    for planner_name in ("heuristic", "demo", "gemini", "openai", "ollama"):
         out_path = tmp_path / f"{planner_name}.json"
         result = RUNNER.invoke(
             app,
