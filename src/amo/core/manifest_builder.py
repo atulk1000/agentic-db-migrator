@@ -101,6 +101,23 @@ def _estimate_rows_pg_stats(cur, schema: str, table: str) -> Optional[int]:
     return int(row[0])
 
 
+def _estimate_relation_rows(cur, schema: str, name: str) -> Optional[int]:
+    cur.execute(
+        """
+        SELECT c.reltuples::bigint
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s
+          AND c.relname = %s
+        """,
+        (schema, name),
+    )
+    row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    return int(row[0])
+
+
 def _get_columns_pg(cur, schema: str, table: str) -> List[Dict[str, Any]]:
     """
     DDL-quality column metadata:
@@ -173,6 +190,10 @@ def _get_primary_key_columns(cur, schema: str, table: str) -> List[str]:
 
 def _has_geometry(cols: List[Dict[str, Any]]) -> bool:
     return any(c.get("udt_name") == "geometry" for c in cols)
+
+
+def _geometry_columns(cols: List[Dict[str, Any]]) -> List[str]:
+    return [c["name"] for c in cols if c.get("udt_name") == "geometry"]
 
 
 def _get_partition_info(cur, schema: str, table: str) -> Dict[str, Any]:
@@ -307,7 +328,22 @@ def _get_matviews(cur, schema: str) -> List[Dict[str, Any]]:
         """,
         (schema,),
     )
-    return [{"schema": schema, "name": r[0], "definition": r[1]} for r in rows]
+    matviews = []
+    for name, definition in rows:
+        cols = _get_columns_pg(cur, schema, name)
+        matviews.append(
+            {
+                "schema": schema,
+                "name": name,
+                "definition": definition,
+                "estimated_rows": _estimate_relation_rows(cur, schema, name),
+                "estimated_bytes": _get_total_relation_size(cur, schema, name),
+                "has_geometry": _has_geometry(cols),
+                "geometry_columns": _geometry_columns(cols),
+                "grants": _get_relation_grants(cur, schema, name),
+            }
+        )
+    return matviews
 
 
 def _get_matview_indexes(cur, schema: str) -> List[Dict[str, Any]]:
@@ -376,6 +412,70 @@ def _get_udfs(cur, schema: str) -> List[Dict[str, Any]]:
     return [{"schema": r[0], "name": r[1], "create_statement": r[2]} for r in rows]
 
 
+def _get_schema_grants(cur, schema: str) -> List[Dict[str, Any]]:
+    rows = _fetchall(
+        cur,
+        """
+        SELECT grantee.rolname AS grantee,
+               mapped.privilege_type
+        FROM pg_namespace n
+        CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+        JOIN pg_roles grantee ON grantee.oid = acl.grantee
+        JOIN LATERAL (
+            SELECT CASE acl.privilege_type
+                WHEN 'U' THEN 'USAGE'
+                WHEN 'C' THEN 'CREATE'
+                ELSE acl.privilege_type::text
+            END AS privilege_type
+        ) mapped ON TRUE
+        WHERE n.nspname = %s
+        ORDER BY grantee.rolname, mapped.privilege_type
+        """,
+        (schema,),
+    )
+    return [{"grantee": r[0], "privilege_type": r[1], "object_type": "schema", "schema": schema} for r in rows]
+
+
+def _get_relation_grants(cur, schema: str, name: str) -> List[Dict[str, Any]]:
+    rows = _fetchall(
+        cur,
+        """
+        SELECT grantee.rolname AS grantee,
+               mapped.privilege_type
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) acl
+        JOIN pg_roles grantee ON grantee.oid = acl.grantee
+        JOIN LATERAL (
+            SELECT CASE acl.privilege_type
+                WHEN 'r' THEN 'SELECT'
+                WHEN 'a' THEN 'INSERT'
+                WHEN 'w' THEN 'UPDATE'
+                WHEN 'd' THEN 'DELETE'
+                WHEN 'D' THEN 'TRUNCATE'
+                WHEN 'x' THEN 'REFERENCES'
+                WHEN 't' THEN 'TRIGGER'
+                ELSE acl.privilege_type::text
+            END AS privilege_type
+        ) mapped ON TRUE
+        WHERE n.nspname = %s
+          AND c.relname = %s
+        ORDER BY grantee.rolname, mapped.privilege_type
+        """,
+        (schema, name),
+    )
+    return [
+        {
+            "grantee": r[0],
+            "privilege_type": r[1],
+            "object_type": "relation",
+            "schema": schema,
+            "object_name": name,
+        }
+        for r in rows
+    ]
+
+
 def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any]:
     migration_cfg = cfg.get("migration", {})
     include_schemas: List[str] = migration_cfg.get("include_schemas", [])
@@ -391,6 +491,7 @@ def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any
     discovered_matviews: List[Dict[str, Any]] = []
     discovered_mv_indexes: List[Dict[str, Any]] = []
     discovered_udfs: List[Dict[str, Any]] = []
+    discovered_schema_grants: Dict[str, List[Dict[str, Any]]] = {}
     errors: List[Dict[str, str]] = []
 
     with psycopg2.connect(dsn) as conn:
@@ -414,6 +515,7 @@ def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any
 
                 # schema-level objects
                 try:
+                    discovered_schema_grants[schema] = _get_schema_grants(cur, schema)
                     discovered_matviews.extend(_get_matviews(cur, schema))
                     discovered_mv_indexes.extend(_get_matview_indexes(cur, schema))
                     # UDFs are optional: include only if asked
@@ -448,10 +550,12 @@ def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any
                                 "estimated_bytes": est_bytes,
                                 "primary_key": pk_cols,
                                 "has_geometry": _has_geometry(cols),
+                                "geometry_columns": _geometry_columns(cols),
                                 "columns": cols,
                                 "partition": part,
                                 "foreign_keys": fks,
                                 "indexes": idxs,
+                                "grants": _get_relation_grants(cur, schema, table),
                             }
                         )
                     except Exception as e:
@@ -471,6 +575,7 @@ def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any
         "matviews": discovered_matviews,
         "matview_indexes": discovered_mv_indexes,
         "udfs": discovered_udfs,
+        "schema_grants": discovered_schema_grants,
         "errors": errors,
     }
 

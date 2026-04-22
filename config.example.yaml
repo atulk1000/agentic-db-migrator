@@ -2,13 +2,14 @@ app:
   name: agentic-migration-orchestrator
 
 engine:
-  type: copy
+  type: copy                 # copy | spark_jdbc
   auto_ddl: true
   allow_destructive: true     # required if truncate_first=true
   verify_inline: false        # you can keep external verifier instead
   copy:
     truncate_first: true
     spool_dir: null           # or "./.spool"
+    batchsize: 10000
 
 source:
   host: ${SRC_HOST}
@@ -45,6 +46,9 @@ planning:
   planner: heuristic        # heuristic | demo | gemini | openai | ollama
   max_partitions: 16
   default_batch_size: 20000
+
+post_migration:
+  maintenance: auto         # auto | analyze_only | vacuum_analyze | off
 
 verify:
   sample_hash: false

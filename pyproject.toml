@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ui = ["streamlit"]
 
 [project.scripts]
 amo = "amo.cli:app"

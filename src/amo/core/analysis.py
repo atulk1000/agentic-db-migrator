@@ -535,12 +535,38 @@ def filter_plan_for_approval(
 
     approved_schemas = {key.split(".", 1)[0] for key in approved_actions}
     filtered_steps: List[Dict[str, Any]] = []
+    partition_parent_keys = {
+        _table_key(step.get("schema"), step.get("table"))
+        for step in plan_obj.get("steps", [])
+        if step.get("op") == "verify_table"
+        and bool((step.get("validate") or {}).get("partition_fidelity", False))
+        and step.get("schema")
+        and step.get("table")
+    }
+    active_partition_parent: Optional[str] = None
 
     for step in plan_obj.get("steps", []):
         op = step.get("op")
         schema = step.get("schema")
         table = step.get("table")
         table_key = _table_key(schema, table) if schema and table else None
+
+        if active_partition_parent:
+            if op in ("ensure_table", "copy_table") and table_key not in approved_actions:
+                filtered_steps.append(step)
+                continue
+            if table_key == active_partition_parent and op in (
+                "sync_sequences",
+                "create_indexes",
+                "verify_table",
+                "analyze_table",
+                "vacuum_analyze_table",
+            ):
+                filtered_steps.append(step)
+                if op in ("analyze_table", "vacuum_analyze_table", "verify_table"):
+                    active_partition_parent = None
+                continue
+            active_partition_parent = None
 
         if op == "ensure_schema":
             if schema in approved_schemas:
@@ -572,6 +598,8 @@ def filter_plan_for_approval(
             continue
 
         action = approved_actions[table_key]
+        if op == "ensure_table" and table_key in partition_parent_keys:
+            active_partition_parent = table_key
         if action == "sync_metadata" and op not in ("ensure_table", "create_indexes"):
             continue
 

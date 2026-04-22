@@ -66,6 +66,19 @@ The planning layer can support:
 
 Today, the deterministic analysis layer already computes much of that from manifests and diffs. A real LLM-backed planner can later replace or augment those recommendations while still emitting the same structured plan schema.
 
+## Large-Migration Features
+
+The project now includes first-class support or scaffolding for the features that originally motivated it:
+
+- `spark_jdbc` execution mode for large table movement
+- geometry-aware transfer metadata for PostGIS-heavy tables
+- grants discovery and replay
+- staged materialized view rebuilds for large or geometry-heavy matviews
+- partition replication fidelity checks
+- post-migration maintenance steps such as `ANALYZE` and `VACUUM ANALYZE`
+
+The heuristic planner emits these as structured plan steps or transfer hints so the same approval flow applies to them.
+
 ## Planner Backends
 
 The CLI accepts:
@@ -119,6 +132,46 @@ pip install -e .
 
 Copy-Item config.example.yaml config.yaml
 Copy-Item .env.example .env
+```
+
+### Optional Browser UI
+
+A lightweight Streamlit UI is included for users who want to test the migration workflow in a browser instead of using the CLI directly.
+
+Install the UI dependency:
+
+```powershell
+pip install -e .[ui]
+```
+
+Launch it:
+
+```powershell
+streamlit run streamlit_app.py
+```
+
+The UI can:
+
+- run `analyze`
+- render the pre-migration summary
+- create an approval artifact
+- execute the approved run
+- generate the post-migration summary
+
+The browser UI is a workflow dashboard, not a separate migration engine. It uses the same underlying project functions as the CLI and is intended to make it easier to test the end-to-end flow in a browser.
+
+The main screens map to the same artifacts as the CLI:
+
+- `Migration Plan File` points to the generated `plan.json`
+- `Run State File` points to the execution state file written during `run`
+- `Pre-Migration Summary File` points to `pre_migration_summary.json`
+- `Verification Report File (Optional)` points to a standalone `verify` report if you generated one
+- `Post-Migration Summary Output File` is where the final browser-built summary will be written
+
+If a workflow action succeeds but the dashboard looks stale, restart Streamlit so it reloads the latest code and session state:
+
+```powershell
+streamlit run streamlit_app.py
 ```
 
 If you want to try the hosted demo endpoint path, set:
@@ -235,7 +288,11 @@ The current implementation is strongest as a Postgres-to-Postgres migration orch
 - tables and partition awareness
 - indexes and foreign keys
 - materialized views
+- staged materialized view rebuilds
+- schema and relation grants
 - UDF recreation
+- optional Spark/JDBC transfer mode for large tables
+- post-migration maintenance (`ANALYZE` / `VACUUM ANALYZE`)
 - resumable execution
 - rowcount and optional sample-hash verification
 
@@ -284,6 +341,7 @@ tests/
 - replace the `openai` fallback with a true structured OpenAI planner
 - harden the hosted demo planner with retries, repair, and better telemetry
 - expand diffing and verification depth
-- add richer risk scoring and transfer optimization
+- deepen the `spark_jdbc` engine with chunked/partition-wise execution policies
+- improve PostGIS conversion handling for non-native transfer paths
 - add evals for planner quality and fallback rate
 - extract dialect adapters for additional databases

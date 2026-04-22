@@ -139,13 +139,17 @@ class MigrationOrchestrator:
             cur.execute(q, params)
             return cur.fetchall()
 
-    def copy_table(self, schema: str, table: str) -> None:
+    def copy_table(self, schema: str, table: str, transfer: Optional[Dict[str, Any]] = None) -> None:
         """
         Public method invoked by plan step: op == 'copy_table'
         Ensures schema + table exist (auto-DDL if enabled), then copies data.
         """
         self.ensure_schema(schema)
         self.ensure_table_like_source(schema, table)
+        transfer = transfer or {}
+        if self.engine_type == "spark_jdbc":
+            self._copy_table_spark_jdbc(schema, table, transfer=transfer)
+            return
         self._copy_table_psycopg2(schema, table)
     
     def set_session_settings(self, conn) -> None:
@@ -475,6 +479,87 @@ class MigrationOrchestrator:
         finally:
             self._put_src(src)
             self._put_tgt(tgt)
+
+    def _copy_table_spark_jdbc(self, schema: str, table: str, transfer: Dict[str, Any]) -> None:
+        if transfer.get("geometry_mode") not in (None, "default") or transfer.get("has_geometry"):
+            self._copy_table_psycopg2(schema, table)
+            return
+
+        try:
+            from pyspark.sql import SparkSession
+        except Exception as exc:
+            raise RuntimeError(f"spark_jdbc engine requested but pyspark is not installed: {exc}") from exc
+
+        src_conn = self._src()
+        tgt_conn = self._tgt()
+        try:
+            src_conn.autocommit = True
+            tgt_conn.autocommit = True
+
+            chunk_column = transfer.get("chunk_column")
+            lower_bound = upper_bound = None
+            if chunk_column:
+                with src_conn.cursor() as cur:
+                    try:
+                        cur.execute(
+                            sql.SQL("SELECT MIN({}), MAX({}) FROM {}").format(
+                                sql.Identifier(chunk_column),
+                                sql.Identifier(chunk_column),
+                                _fq(schema, table),
+                            )
+                        )
+                        lower_bound, upper_bound = cur.fetchone()
+                    except Exception:
+                        chunk_column = None
+
+            if self.truncate_first:
+                if not self.allow_destructive:
+                    raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
+                with tgt_conn.cursor() as cur:
+                    cur.execute(sql.SQL("TRUNCATE TABLE {} CASCADE").format(_fq(schema, table)))
+
+            spark = SparkSession.builder.appName("AgenticDbMigrator").getOrCreate()
+            jdbc_url_src = (
+                f"jdbc:postgresql://{self.cfg['source']['host']}:{self.cfg['source'].get('port', 5432)}/{self.cfg['source']['database']}"
+            )
+            jdbc_url_tgt = (
+                f"jdbc:postgresql://{self.cfg['target']['host']}:{self.cfg['target'].get('port', 5432)}/{self.cfg['target']['database']}"
+            )
+            read_options = {
+                "url": jdbc_url_src,
+                "dbtable": f'"{schema}"."{table}"',
+                "user": self.cfg["source"]["user"],
+                "password": self.cfg["source"]["password"],
+                "driver": "org.postgresql.Driver",
+                "fetchsize": "10000",
+            }
+            chunk_count = int(transfer.get("chunk_count") or 1)
+            if chunk_column and lower_bound is not None and upper_bound is not None and lower_bound != upper_bound:
+                read_options.update(
+                    {
+                        "partitionColumn": chunk_column,
+                        "lowerBound": str(lower_bound),
+                        "upperBound": str(upper_bound),
+                        "numPartitions": str(chunk_count),
+                    }
+                )
+
+            df = spark.read.format("jdbc").options(**read_options).load()
+            if chunk_count > 1 and "numPartitions" not in read_options:
+                df = df.repartition(chunk_count)
+
+            write_options = {
+                "url": jdbc_url_tgt,
+                "dbtable": f'"{schema}"."{table}"',
+                "user": self.cfg["target"]["user"],
+                "password": self.cfg["target"]["password"],
+                "driver": "org.postgresql.Driver",
+                "batchsize": str(self.cfg.get("engine", {}).get("copy", {}).get("batchsize", 10000)),
+            }
+            df.write.format("jdbc").options(**write_options).mode("append").save()
+        finally:
+            self._put_src(src_conn)
+            self._put_tgt(tgt_conn)
  
     def sync_sequences(self, schema: str, table: str) -> None:
         """
@@ -633,15 +718,50 @@ class MigrationOrchestrator:
                 definition = mv.get("definition")
                 if not name or not definition:
                     continue
+                definition = definition.strip().rstrip(";")
                 if self.matview_exists(tgt, schema, name):
                     continue
-
-                stmt = sql.SQL("CREATE MATERIALIZED VIEW {} AS {} WITH DATA").format(
-                    _fq(schema, name),
-                    sql.SQL(definition),
-                )
+                strategy = mv.get("strategy", "direct_rebuild")
+                staging_table = mv.get("staging_table")
+                if strategy == "staged_rebuild" and staging_table:
+                    stmt = sql.SQL("CREATE MATERIALIZED VIEW {} AS SELECT * FROM {} WITH DATA").format(
+                        _fq(schema, name),
+                        _fq(schema, staging_table),
+                    )
+                else:
+                    stmt = sql.SQL("CREATE MATERIALIZED VIEW {} AS {} WITH DATA").format(
+                        _fq(schema, name),
+                        sql.SQL(definition),
+                    )
                 with tgt.cursor() as cur:
                     cur.execute(stmt)
+        finally:
+            self._put_tgt(tgt)
+
+    def stage_matviews(self, schema: str, matviews: List[Dict[str, Any]]) -> None:
+        if not matviews:
+            return
+
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+
+            for mv in matviews:
+                name = mv.get("name")
+                definition = mv.get("definition")
+                staging_table = mv.get("staging_table")
+                if not (name and definition and staging_table):
+                    continue
+                definition = definition.strip().rstrip(";")
+                with tgt.cursor() as cur:
+                    cur.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(_fq(schema, staging_table)))
+                    cur.execute(
+                        sql.SQL("CREATE TABLE {} AS {}").format(
+                            _fq(schema, staging_table),
+                            sql.SQL(definition),
+                        )
+                    )
         finally:
             self._put_tgt(tgt)
 
@@ -686,6 +806,70 @@ class MigrationOrchestrator:
                     continue
                 with tgt.cursor() as cur:
                     cur.execute(stmt)
+        finally:
+            self._put_tgt(tgt)
+
+    def apply_grants(self, schema: str, grants: List[Dict[str, Any]]) -> None:
+        if not grants:
+            return
+
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+            with tgt.cursor() as cur:
+                for grant in grants:
+                    grantee = grant.get("grantee")
+                    privilege = grant.get("privilege_type")
+                    object_type = grant.get("object_type")
+                    object_name = grant.get("object_name")
+                    object_schema = grant.get("schema", schema)
+                    if not grantee or not privilege:
+                        continue
+                    if object_type == "schema":
+                        stmt = sql.SQL("GRANT {} ON SCHEMA {} TO {}").format(
+                            sql.SQL(privilege),
+                            sql.Identifier(object_schema),
+                            sql.Identifier(grantee),
+                        )
+                    elif object_name:
+                        stmt = sql.SQL("GRANT {} ON TABLE {} TO {}").format(
+                            sql.SQL(privilege),
+                            _fq(object_schema, object_name),
+                            sql.Identifier(grantee),
+                        )
+                    else:
+                        continue
+                    try:
+                        cur.execute(stmt)
+                    except psycopg2.Error as exc:
+                        if exc.pgcode in ("42701", "42704"):
+                            continue
+                        raise
+        finally:
+            self._put_tgt(tgt)
+
+    def analyze_table(self, schema: str, table: str, maintenance: Optional[Dict[str, Any]] = None) -> None:
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+            with tgt.cursor() as cur:
+                cur.execute(sql.SQL("ANALYZE {}").format(_fq(schema, table)))
+                if (maintenance or {}).get("cluster_if_needed"):
+                    cur.execute(sql.SQL("CLUSTER {}").format(_fq(schema, table)))
+        finally:
+            self._put_tgt(tgt)
+
+    def vacuum_analyze_table(self, schema: str, table: str, maintenance: Optional[Dict[str, Any]] = None) -> None:
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+            with tgt.cursor() as cur:
+                cur.execute(sql.SQL("VACUUM ANALYZE {}").format(_fq(schema, table)))
+                if (maintenance or {}).get("cluster_if_needed"):
+                    cur.execute(sql.SQL("CLUSTER {}").format(_fq(schema, table)))
         finally:
             self._put_tgt(tgt)
 
@@ -749,6 +933,44 @@ class MigrationOrchestrator:
                 out["target_sample_hash"] = sample_fingerprint(tgt)
                 out["sample_hash_ok"] = (out["source_sample_hash"] == out["target_sample_hash"])
                 out["ok"] = out["ok"] and out["sample_hash_ok"]
+
+            if bool((validate or {}).get("partition_fidelity", False)):
+                src_children = {
+                    (row[0], row[1], row[2] or "")
+                    for row in self._fetch(
+                        src,
+                        """
+                        SELECT cn.nspname, child.relname, pg_get_expr(child.relpartbound, child.oid)
+                        FROM pg_inherits i
+                        JOIN pg_class parent ON parent.oid = i.inhparent
+                        JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+                        JOIN pg_class child ON child.oid = i.inhrelid
+                        JOIN pg_namespace cn ON cn.oid = child.relnamespace
+                        WHERE pn.nspname = %s AND parent.relname = %s
+                        ORDER BY cn.nspname, child.relname
+                        """,
+                        (schema, table),
+                    )
+                }
+                tgt_children = {
+                    (row[0], row[1], row[2] or "")
+                    for row in self._fetch(
+                        tgt,
+                        """
+                        SELECT cn.nspname, child.relname, pg_get_expr(child.relpartbound, child.oid)
+                        FROM pg_inherits i
+                        JOIN pg_class parent ON parent.oid = i.inhparent
+                        JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+                        JOIN pg_class child ON child.oid = i.inhrelid
+                        JOIN pg_namespace cn ON cn.oid = child.relnamespace
+                        WHERE pn.nspname = %s AND parent.relname = %s
+                        ORDER BY cn.nspname, child.relname
+                        """,
+                        (schema, table),
+                    )
+                }
+                out["partition_children_ok"] = src_children == tgt_children
+                out["ok"] = out["ok"] and out["partition_children_ok"]
             return out
         finally:
             self._put_src(src)
@@ -803,7 +1025,7 @@ def execute(
                     orch.ensure_table_like_source(step["schema"], step["table"])
 
                 elif op == "copy_table":
-                    orch.copy_table(step["schema"], step["table"])
+                    orch.copy_table(step["schema"], step["table"], transfer=step.get("transfer", {}) or {})
 
                 elif op == "sync_sequences":
                     orch.sync_sequences(step["schema"], step["table"])
@@ -814,11 +1036,23 @@ def execute(
                 elif op == "add_fks":
                     orch.add_fks(step["schema"], step.get("fks", []))
 
+                elif op == "apply_grants":
+                    orch.apply_grants(step["schema"], step.get("grants", []))
+
+                elif op == "stage_matviews":
+                    orch.stage_matviews(step["schema"], step.get("matviews", []))
+
                 elif op == "create_matviews":
                     orch.create_matviews(step["schema"], step.get("matviews", []))
 
                 elif op == "create_mv_indexes":
                     orch.create_mv_indexes(step["schema"], step.get("indexes", []))
+
+                elif op == "analyze_table":
+                    orch.analyze_table(step["schema"], step["table"], maintenance=step.get("maintenance", {}) or {})
+
+                elif op == "vacuum_analyze_table":
+                    orch.vacuum_analyze_table(step["schema"], step["table"], maintenance=step.get("maintenance", {}) or {})
 
                 elif op == "verify_table":
                     rep = orch.verify_table(step["schema"], step["table"], step.get("validate", {}) or {})
