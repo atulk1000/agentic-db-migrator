@@ -1,17 +1,56 @@
 # Agentic DB Migration Orchestrator
 
-An approval-gated database migration orchestrator for PostgreSQL. It inspects source and target databases, computes deterministic drift, generates a structured migration plan, lets a human review and approve that plan, then executes only the approved actions with checkpointing and verification.
+An approval-gated database migration orchestrator for PostgreSQL with a CLI workflow, a browser dashboard, deterministic execution, and LLM-planner hooks.
 
-The key design choice is simple:
+This repo is built around one core idea:
 
 - the planner recommends
 - the executor enforces
 
-That means you can use a heuristic planner today and swap in a real LLM-backed planner later without changing the safety boundary.
+That separation matters. It means you can experiment with heuristic, hosted-demo, Gemini, or future OpenAI/Ollama planners without giving a model direct authority over mutation, DDL, or cutover behavior.
 
-## Default Workflow
+## Why This Repo Is Interesting
 
-The primary workflow is now:
+This is not just a one-shot migration script. The repo already includes the pieces you would expect from a more serious migration platform:
+
+- source and target discovery
+- deterministic drift analysis
+- plan generation with strict schema validation
+- human review and approval before mutation
+- resumable execution with checkpoint state
+- verification and post-migration reporting
+- browser-based demo/testing workflow
+- Dockerized local demo stack
+- scaffolding for large-table and partition-aware transfers
+
+It was inspired by a real-world need: replicating large Postgres datasets and partitioned structures reliably into QA or higher environments when naive copy approaches and many off-the-shelf tools are not enough.
+
+## What The Repo Supports Today
+
+The strongest current path is Postgres-to-Postgres migration with:
+
+- table discovery and metadata extraction
+- partition-aware DDL recreation
+- partition fidelity verification
+- foreign keys and indexes
+- schema and relation grants
+- UDF recreation
+- materialized views, including staged rebuild support
+- rowcount and optional sample-hash verification
+- post-migration `ANALYZE` / `VACUUM ANALYZE`
+- approval-gated execution
+- optional Streamlit UI for browser-based testing
+
+The codebase also includes experimental or evolving support/scaffolding for:
+
+- `spark_jdbc` transfer planning
+- geometry-aware metadata for PostGIS-heavy tables
+- hosted demo planner endpoints
+- shared normalization/validation logic for LLM planner outputs
+
+## Core Workflow
+
+The main workflow is:
 
 1. `analyze`
 2. `review`
@@ -19,69 +58,39 @@ The primary workflow is now:
 4. `run`
 5. `summarize-post`
 
-This is the recommended path for both heuristic and LLM planning because it separates read-only analysis from execution.
+This is the recommended path for both heuristic and LLM planning because it separates read-only analysis from mutation.
 
-### What Each Step Does
+### What Each Step Produces
 
 - `analyze`
   - discovers both source and target
   - writes `source_manifest.json` and `target_manifest.json`
   - computes `manifest_diff.json`
   - generates `plan.json`
-  - produces `pre_migration_summary.json` and a readable summary file
+  - produces `pre_migration_summary.json`
 - `review`
-  - prints the pre-migration summary for human review
+  - renders the pre-migration summary for human inspection
 - `approve`
-  - creates an `approval.json` artifact with the approved migration mode, table scope, and destructive-policy choices
+  - creates `approval.json` with the approved mode, scope, and destructive-policy choices
 - `run`
   - executes only the approved subset of the plan
 - `summarize-post`
-  - produces a final post-migration summary from execution state and verification output
+  - produces a final post-migration summary from the plan, state file, and optional verification report
 
 ## Why This Is Better Than Direct Execute
 
-The older low-level commands are still available, but the new workflow is better for production because it adds:
+The repo still exposes lower-level commands, but the approval-gated flow is stronger because it adds:
 
-- source vs target drift analysis before transfer
-- pre-migration warnings and manual-review routing
+- source-vs-target drift analysis before transfer
+- preflight warnings and manual-review routing
 - explicit migration modes
-- human approval before mutation
-- auditable approval artifacts
-- post-migration reporting
-
-## Planner Capabilities
-
-The planning layer can support:
-
-- table ordering beyond simple size sorting
-- transfer strategy selection
-- chunking-column selection
-- chunk count and concurrency hints
-- verification depth selection
-- risk scoring
-- preflight warnings
-- manual-review routing
-- pre-migration summary generation
-- post-migration summary generation
-
-Today, the deterministic analysis layer already computes much of that from manifests and diffs. A real LLM-backed planner can later replace or augment those recommendations while still emitting the same structured plan schema.
-
-## Large-Migration Features
-
-The project now includes first-class support or scaffolding for the features that originally motivated it:
-
-- `spark_jdbc` execution mode for large table movement
-- geometry-aware transfer metadata for PostGIS-heavy tables
-- grants discovery and replay
-- staged materialized view rebuilds for large or geometry-heavy matviews
-- partition replication fidelity checks
-- post-migration maintenance steps such as `ANALYZE` and `VACUUM ANALYZE`
-
-The heuristic planner emits these as structured plan steps or transfer hints so the same approval flow applies to them.
+- audit-friendly approval artifacts
+- scoped execution by approved tables
+- post-migration summaries instead of only raw logs
 
 ## Planner Backends
 
-The CLI accepts:
+The CLI and browser UI accept:
 
 - `heuristic`
 - `demo`
@@ -92,25 +101,113 @@ The CLI accepts:
 Current behavior:
 
 - `heuristic` is real and deterministic
-- `demo` can call a hosted planner endpoint that you control, and otherwise falls back to the heuristic planner
-- `gemini` can call the Gemini API when `GEMINI_API_KEY` is configured, and otherwise falls back to the heuristic planner
-- `openai` is kept as a demo adapter and still falls back to local heuristic planning
-- `ollama` currently falls back to local heuristic planning
+- `demo` can call a hosted planner endpoint you control and otherwise falls back safely
+- `gemini` can call Gemini directly when `GEMINI_API_KEY` is configured and otherwise falls back safely
+- `openai` is currently a demo adapter and falls back to heuristic
+- `ollama` currently falls back to heuristic
 
-Important notes:
-
-- `demo` is only for low-friction public demos; it assumes you host a planner service and keep the real LLM credentials server-side
-- for normal LLM-based planning, each user should provide their own API key or local model runtime
-- `openai` requires your own OpenAI API key and OpenAI API billing once a real adapter is wired in
-- ChatGPT Plus does not include OpenAI API credits
-- `gemini` is the easiest direct hosted planner path when each user brings their own key
-
-All live LLM-backed planners are expected to go through the same safety gate:
+All LLM-backed planner paths are expected to go through the same safety gate:
 
 - provider-specific API call
-- shared normalization and repair of common model mistakes
+- shared normalization/repair of common model mistakes
 - strict plan validation
 - heuristic fallback if the output is still invalid
+
+## Large-Migration Features
+
+The repo already includes first-class support or structured scaffolding for:
+
+- `spark_jdbc` execution mode for large-table movement
+- transfer hints like chunk column and chunk count
+- geometry-aware metadata for PostGIS-heavy tables
+- staged materialized view rebuilds
+- grants discovery and replay
+- partition replication fidelity checks
+- post-migration maintenance steps
+
+These are emitted as structured plan steps or hints, so they stay inside the same approval and execution boundary.
+
+## Demo Paths
+
+There are three practical ways to demo the project.
+
+### 1. Fastest CLI Demo
+
+Use the approval-gated flow against the local Docker Postgres pair:
+
+```powershell
+python -m amo.cli analyze --config config.yaml --planner heuristic --out-dir runs\analysis_demo
+python -m amo.cli review --summary runs\analysis_demo\pre_migration_summary.json
+python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --out runs\analysis_demo\approval.json
+python -m amo.cli run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json
+python -m amo.cli summarize-post --plan runs\analysis_demo\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_demo\pre_migration_summary.json --out runs\analysis_demo\post_migration_summary.json
+```
+
+### 2. Browser Demo
+
+A lightweight Streamlit dashboard is included in [streamlit_app.py](/C:/Users/incre/OneDrive/Documents/Github/agentic-db-migrator/streamlit_app.py).
+
+Install the UI dependency:
+
+```powershell
+pip install -e .[ui]
+```
+
+Launch it:
+
+```powershell
+streamlit run streamlit_app.py
+```
+
+The browser UI is not a separate migration engine. It drives the same underlying project functions as the CLI and is intended to make the full workflow easier to inspect:
+
+- analyze
+- review
+- approve
+- run
+- summarize-post
+
+Key labels in the UI map to CLI artifacts:
+
+- `Migration Plan File` -> `plan.json`
+- `Run State File` -> execution state produced during `run`
+- `Pre-Migration Summary File` -> `pre_migration_summary.json`
+- `Verification Report File (Optional)` -> standalone `verify` output if present
+- `Post-Migration Summary Output File` -> final summary written by the UI
+
+### 3. Hosted Demo Planner
+
+If you want a low-friction public demo without distributing provider credentials, use the `demo` planner and point it at a hosted planner endpoint:
+
+```powershell
+$env:DEMO_PLANNER_URL="https://your-demo-planner.example.com/plan"
+```
+
+That endpoint is expected to receive the manifest and return a valid plan object or `{ "plan": ... }`.
+
+## Containerized Demo Stack
+
+The repo includes:
+
+- [docker-compose.yml](/C:/Users/incre/OneDrive/Documents/Github/agentic-db-migrator/docker-compose.yml)
+- [Dockerfile](/C:/Users/incre/OneDrive/Documents/Github/agentic-db-migrator/Dockerfile)
+
+Current Docker services:
+
+- `source-db`
+  - seeded Postgres source database
+- `target-db`
+  - empty Postgres target database
+- `migrator`
+  - app container built from the repo and configured to run `python -m amo.cli`
+
+Bring the stack up with:
+
+```powershell
+docker compose up -d --build
+```
+
+This is best thought of as a containerized CLI/demo stack today. The Streamlit UI is currently launched from the local Python environment unless you extend the app container command to run Streamlit.
 
 ## Quickstart
 
@@ -134,101 +231,16 @@ Copy-Item config.example.yaml config.yaml
 Copy-Item .env.example .env
 ```
 
-### Optional Browser UI
+### Hosted Gemini Demo Path
 
-A lightweight Streamlit UI is included for users who want to test the migration workflow in a browser instead of using the CLI directly.
-
-Install the UI dependency:
-
-```powershell
-pip install -e .[ui]
-```
-
-Launch it:
-
-```powershell
-streamlit run streamlit_app.py
-```
-
-The UI can:
-
-- run `analyze`
-- render the pre-migration summary
-- create an approval artifact
-- execute the approved run
-- generate the post-migration summary
-
-The browser UI is a workflow dashboard, not a separate migration engine. It uses the same underlying project functions as the CLI and is intended to make it easier to test the end-to-end flow in a browser.
-
-The main screens map to the same artifacts as the CLI:
-
-- `Migration Plan File` points to the generated `plan.json`
-- `Run State File` points to the execution state file written during `run`
-- `Pre-Migration Summary File` points to `pre_migration_summary.json`
-- `Verification Report File (Optional)` points to a standalone `verify` report if you generated one
-- `Post-Migration Summary Output File` is where the final browser-built summary will be written
-
-If a workflow action succeeds but the dashboard looks stale, restart Streamlit so it reloads the latest code and session state:
-
-```powershell
-streamlit run streamlit_app.py
-```
-
-If you want to try the hosted demo endpoint path, set:
-
-```powershell
-$env:DEMO_PLANNER_URL="https://your-demo-planner.example.com/plan"
-```
-
-This path is intended only for demos. In normal usage, a user should configure their own provider credentials.
-
-If you want to try the direct Gemini planner path locally with your own key, set:
+If you want to use the direct Gemini planner locally:
 
 ```powershell
 $env:GEMINI_API_KEY="your-key-here"
-```
-
-### Recommended Approval-Gated Flow
-
-```powershell
-python -m amo.cli analyze --config config.yaml --planner demo --out-dir runs\analysis_demo
-python -m amo.cli review --summary runs\analysis_demo\pre_migration_summary.json
-python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --out runs\analysis_demo\approval.json
-python -m amo.cli run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json
-python -m amo.cli summarize-post --plan runs\analysis_demo\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_demo\pre_migration_summary.json --out runs\analysis_demo\post_migration_summary.json
-```
-
-### Recommended Local LLM Flow
-
-If you want to run the planner directly with your own hosted-model key, use `gemini` instead of `demo`:
-
-```powershell
 python -m amo.cli analyze --config config.yaml --planner gemini --out-dir runs\analysis_gemini
-python -m amo.cli review --summary runs\analysis_gemini\pre_migration_summary.json
-python -m amo.cli approve --plan runs\analysis_gemini\plan.json --summary runs\analysis_gemini\pre_migration_summary.json --mode safe_sync --out runs\analysis_gemini\approval.json
-python -m amo.cli run --config config.yaml --plan runs\analysis_gemini\plan.json --approval runs\analysis_gemini\approval.json
-python -m amo.cli summarize-post --plan runs\analysis_gemini\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_gemini\pre_migration_summary.json --out runs\analysis_gemini\post_migration_summary.json
 ```
 
-Expected request shape for a hosted demo planner:
-
-```json
-{
-  "manifest": { "...": "the full source manifest" },
-  "requested_planner": "demo",
-  "requested_provider": "gemini"
-}
-```
-
-The endpoint may return either:
-
-```json
-{ "plan": { "...": "full migration plan" } }
-```
-
-or the plan object directly. The plan must still satisfy the repo's validated plan schema.
-
-### Low-Level Commands
+## Low-Level Commands
 
 These still exist for debugging and development:
 
@@ -242,7 +254,7 @@ python -m amo.cli verify --config config.yaml --plan plan.json --out report.json
 
 ## Migration Modes
 
-The approval artifact supports these modes:
+The approval artifact supports:
 
 - `full_refresh`
 - `missing_only`
@@ -255,7 +267,7 @@ The approval artifact supports these modes:
 
 ## Artifacts
 
-The new workflow writes a reusable set of artifacts:
+The main workflow writes a reusable artifact set:
 
 - `source_manifest.json`
 - `target_manifest.json`
@@ -267,7 +279,7 @@ The new workflow writes a reusable set of artifacts:
 - `report.json`
 - `post_migration_summary.json`
 
-These make the process auditable and resumable.
+These make the process auditable, reviewable, and resumable.
 
 ## Safety Model
 
@@ -280,31 +292,6 @@ This project is AI-assisted, not AI-autonomous.
 - manual-review items are surfaced before execution
 - the executor never runs arbitrary free-form model SQL
 
-## Current Scope
-
-The current implementation is strongest as a Postgres-to-Postgres migration orchestrator with support for:
-
-- schema discovery
-- tables and partition awareness
-- indexes and foreign keys
-- materialized views
-- staged materialized view rebuilds
-- schema and relation grants
-- UDF recreation
-- optional Spark/JDBC transfer mode for large tables
-- post-migration maintenance (`ANALYZE` / `VACUUM ANALYZE`)
-- resumable execution
-- rowcount and optional sample-hash verification
-
-## Testing
-
-Run the local checks with:
-
-```powershell
-python -m compileall src tests
-python -m pytest -q
-```
-
 ## Project Structure
 
 ```text
@@ -315,6 +302,7 @@ src/amo/
     config.py
     executor.py
     manifest_builder.py
+    policy.py
     verifier.py
     workflow_models.py
     planners/
@@ -326,6 +314,14 @@ src/amo/
       ollama.py
       openai.py
       remote_demo.py
+  engines/
+    base.py
+    copy_engine.py
+    spark_engine.py
+  migration/
+    introspect.py
+    transfer.py
+streamlit_app.py
 tests/
   test_analysis.py
   test_cli_plan.py
@@ -334,14 +330,49 @@ tests/
   test_heuristic_planner.py
   test_remote_demo_planner.py
   test_verifier.py
+archive/
+  v1/
+```
+
+Notes:
+
+- `src/amo/core/` is the main current implementation path
+- `src/amo/engines/` and `src/amo/migration/` are useful supporting or evolving modules
+- `archive/v1/` preserves the earlier lineage without keeping it on the active path
+
+## Current Scope and Honest Limitations
+
+What is strong today:
+
+- approval-gated Postgres-to-Postgres workflow
+- browser + CLI demoability
+- deterministic executor boundary
+- partition-aware planning/execution
+- structured artifacts and summaries
+
+What is still evolving:
+
+- `openai` is not yet a true live structured planner
+- `ollama` is still fallback-oriented
+- `spark_jdbc` support is scaffolded but not yet battle-hardened
+- Streamlit is a lightweight workflow dashboard, not a polished product UI
+- some Docker/app runtime paths are demo-oriented rather than fully productionized
+
+## Testing
+
+Run the local checks with:
+
+```powershell
+python -m compileall src tests
+python -m pytest -q
 ```
 
 ## Roadmap
 
 - replace the `openai` fallback with a true structured OpenAI planner
 - harden the hosted demo planner with retries, repair, and better telemetry
-- expand diffing and verification depth
-- deepen the `spark_jdbc` engine with chunked/partition-wise execution policies
+- deepen `spark_jdbc` execution behavior for chunked and partition-wise transfer
 - improve PostGIS conversion handling for non-native transfer paths
-- add evals for planner quality and fallback rate
+- expand diffing and verification depth
+- add planner evals and fallback-rate tracking
 - extract dialect adapters for additional databases
