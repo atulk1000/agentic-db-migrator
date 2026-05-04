@@ -171,12 +171,13 @@ def _workflow_status_rows() -> List[Dict[str, Any]]:
 
 
 def _render_overview(summary_obj: Dict[str, Any] | None, diff_obj: Dict[str, Any] | None, plan_obj: Dict[str, Any] | None) -> None:
+    overview = (summary_obj or {}).get("overview", {})
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Plan Steps", len((plan_obj or {}).get("steps", [])))
-    c2.metric("Copy Candidates", len([row for row in _table_recommendations(summary_obj) if row.get("action") == "copy"]))
-    c3.metric("Metadata Sync", len([row for row in _table_recommendations(summary_obj) if row.get("action") == "sync_metadata"]))
-    c4.metric("Manual Review", _summary_metric(summary_obj, "manual_review_required"))
-    c5.metric("Warnings", _summary_metric(summary_obj, "warnings"))
+    c1.metric("Source Tables", overview.get("source_tables", 0))
+    c2.metric("Target Tables", overview.get("target_tables", 0))
+    c3.metric("Plan Steps", len((plan_obj or {}).get("steps", [])))
+    c4.metric("Copy Candidates", overview.get("tables_to_copy", 0))
+    c5.metric("Warnings", len((summary_obj or {}).get("preflight_warnings", [])))
 
     if diff_obj:
         drift_rows = [
@@ -195,11 +196,12 @@ def _render_overview(summary_obj: Dict[str, Any] | None, diff_obj: Dict[str, Any
 
 
 def _render_pre_summary_block(summary_obj: Dict[str, Any]) -> None:
+    overview = summary_obj.get("overview", {})
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Copy Candidates", len([row for row in _table_recommendations(summary_obj) if row.get("action") == "copy"]))
-    c2.metric("Metadata Sync", len([row for row in _table_recommendations(summary_obj) if row.get("action") == "sync_metadata"]))
-    c3.metric("Manual Review", _summary_metric(summary_obj, "manual_review_required"))
-    c4.metric("Warnings", _summary_metric(summary_obj, "warnings"))
+    c1.metric("Copy Candidates", overview.get("tables_to_copy", 0))
+    c2.metric("Metadata Sync", overview.get("tables_to_sync_metadata", 0))
+    c3.metric("Manual Review", overview.get("manual_review_count", 0))
+    c4.metric("Warnings", len(summary_obj.get("preflight_warnings", [])))
     st.text(render_pre_migration_summary(summary_obj))
     recommendations = _table_recommendations(summary_obj)
     if recommendations:

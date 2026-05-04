@@ -1,0 +1,14 @@
+.env
+.env.local
+config.yaml
+runs/
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.coverage
+.DS_Store
+venv/
+.venv/
+final_postgres_dev_to_QA_migration_14th_Nov.py

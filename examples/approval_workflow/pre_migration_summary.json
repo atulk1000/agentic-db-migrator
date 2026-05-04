@@ -1,0 +1,58 @@
+{
+  "destructive_actions": [],
+  "drift_summary": {
+    "metadata_diff": 0,
+    "metadata_match": 1,
+    "missing_in_source": 0,
+    "missing_in_target": 1,
+    "source_tables": 2,
+    "target_tables": 1
+  },
+  "manual_review_required": [],
+  "overview": {
+    "manual_review_count": 0,
+    "mode": "safe_sync",
+    "planner": "heuristic_v2",
+    "skipped_tables": 1,
+    "source_tables": 2,
+    "tables_to_copy": 1,
+    "tables_to_sync_metadata": 0,
+    "target_tables": 1
+  },
+  "planner_recommendation": "Plan can proceed after user approval.",
+  "preflight_warnings": [],
+  "table_recommendations": [
+    {
+      "action": "copy",
+      "chunk_column": "event_ts",
+      "chunk_count": 1,
+      "concurrency_hint": 1,
+      "diff_status": "missing_in_target",
+      "manual_review_required": false,
+      "rationale": "metadata_diff=missing_in_target, strategy=full_copy",
+      "risk_level": "low",
+      "risk_score": 0,
+      "schema": "analytics",
+      "table": "events",
+      "transfer_strategy": "full_copy",
+      "verification_depth": "rowcount_and_sample_hash",
+      "warnings": []
+    },
+    {
+      "action": "skip",
+      "chunk_column": "created_at",
+      "chunk_count": 1,
+      "concurrency_hint": 1,
+      "diff_status": "metadata_match",
+      "manual_review_required": false,
+      "rationale": "metadata_diff=metadata_match, strategy=full_copy",
+      "risk_level": "low",
+      "risk_score": 0,
+      "schema": "demo",
+      "table": "users",
+      "transfer_strategy": "full_copy",
+      "verification_depth": "rowcount_and_sample_hash",
+      "warnings": []
+    }
+  ]
+}

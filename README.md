@@ -1,6 +1,6 @@
 # Agentic DB Migration Orchestrator
 
-An approval-gated database migration orchestrator for PostgreSQL with a CLI workflow, a browser dashboard, deterministic execution, and LLM-planner hooks.
+An approval-gated database migration orchestrator for PostgreSQL with a CLI workflow, a browser dashboard, deterministic execution, and optional LLM planning adapters.
 
 This repo is built around one core idea:
 
@@ -8,6 +8,19 @@ This repo is built around one core idea:
 - the executor enforces
 
 That separation matters. It means you can experiment with heuristic, hosted-demo, Gemini, or future OpenAI/Ollama planners without giving a model direct authority over mutation, DDL, or cutover behavior.
+
+```mermaid
+flowchart LR
+    A["Source Postgres"] --> B["Manifest Builder"]
+    C["Target Postgres"] --> B
+    B --> D["Drift Analyzer"]
+    D --> E["Planner"]
+    E --> F["Validated plan.json"]
+    F --> G["Human Approval Gate"]
+    G --> H["Deterministic Executor"]
+    H --> I["Verifier"]
+    I --> J["Post-Migration Summary"]
+```
 
 ## Why This Repo Is Interesting
 
@@ -24,6 +37,22 @@ This is not just a one-shot migration script. The repo already includes the piec
 - scaffolding for large-table and partition-aware transfers
 
 It was inspired by a real-world need: replicating large Postgres datasets and partitioned structures reliably into QA or higher environments when naive copy approaches and many off-the-shelf tools are not enough.
+
+## Reviewable Example Artifacts
+
+The [`examples/approval_workflow`](examples/approval_workflow) folder contains checked-in sample artifacts so reviewers can inspect the workflow without running a database:
+
+- `source_manifest.json`
+- `target_manifest.json`
+- `manifest_diff.json`
+- `plan.json`
+- `pre_migration_summary.json`
+- `approval.json`
+- `state.json`
+- `verification_report.json`
+- `post_migration_summary.md`
+
+These files demonstrate the audit trail the project is designed to produce: what was discovered, what changed, what was approved, what ran, and what verified cleanly.
 
 ## What The Repo Supports Today
 
@@ -113,6 +142,19 @@ All LLM-backed planner paths are expected to go through the same safety gate:
 - strict plan validation
 - heuristic fallback if the output is still invalid
 
+## Safety Boundary
+
+The project is designed so model output can influence planning, but deterministic code owns execution.
+
+| Area | Planner / LLM adapter can do | Deterministic code enforces |
+| --- | --- | --- |
+| Table ordering | Recommend copy order and priorities | Validate allowed operations in `plan.json` |
+| Transfer strategy | Suggest full copy, chunked copy, or partition-wise copy | Execute only supported plan ops |
+| Chunking | Recommend chunk columns and counts | Verify columns exist and remain schema-bound |
+| Verification | Recommend rowcount or sample-hash depth | Run verifier against source and target |
+| Risk handling | Flag warnings and manual-review items | Require explicit approval before execution |
+| SQL execution | No free-form SQL authority | Executor builds allowlisted DDL/COPY operations |
+
 ## Large-Migration Features
 
 The repo already includes first-class support or structured scaffolding for:
@@ -145,7 +187,7 @@ python -m amo.cli summarize-post --plan runs\analysis_demo\plan.json --state run
 
 ### 2. Browser Demo
 
-A lightweight Streamlit dashboard is included in [streamlit_app.py](/C:/Users/incre/OneDrive/Documents/Github/agentic-db-migrator/streamlit_app.py).
+A lightweight Streamlit dashboard is included in [`streamlit_app.py`](streamlit_app.py).
 
 Install the UI dependency:
 
@@ -189,8 +231,8 @@ That endpoint is expected to receive the manifest and return a valid plan object
 
 The repo includes:
 
-- [docker-compose.yml](/C:/Users/incre/OneDrive/Documents/Github/agentic-db-migrator/docker-compose.yml)
-- [Dockerfile](/C:/Users/incre/OneDrive/Documents/Github/agentic-db-migrator/Dockerfile)
+- [`docker-compose.yml`](docker-compose.yml)
+- [`Dockerfile`](Dockerfile)
 
 Current Docker services:
 
@@ -199,7 +241,7 @@ Current Docker services:
 - `target-db`
   - empty Postgres target database
 - `migrator`
-  - app container built from the repo and configured to run `python -m amo.cli`
+  - app container built from the repo and configured to launch the Streamlit workflow dashboard
 
 Bring the stack up with:
 
@@ -207,7 +249,17 @@ Bring the stack up with:
 docker compose up -d --build
 ```
 
-This is best thought of as a containerized CLI/demo stack today. The Streamlit UI is currently launched from the local Python environment unless you extend the app container command to run Streamlit.
+Open the browser dashboard at:
+
+```text
+http://localhost:8501
+```
+
+You can still run CLI commands through the same image:
+
+```powershell
+docker compose run --rm migrator python -m amo.cli analyze --config config.yaml --planner heuristic --out-dir runs/analysis_demo
+```
 
 ## Quickstart
 
@@ -366,6 +418,16 @@ Run the local checks with:
 python -m compileall src tests
 python -m pytest -q
 ```
+
+Format and lint before publishing:
+
+```powershell
+black src tests streamlit_app.py
+isort src tests streamlit_app.py
+ruff check src tests streamlit_app.py
+```
+
+The repo also includes `.gitattributes` and formatter settings in `pyproject.toml` so Python, Markdown, YAML, TOML, and JSON files render cleanly in GitHub review.
 
 ## Roadmap
 

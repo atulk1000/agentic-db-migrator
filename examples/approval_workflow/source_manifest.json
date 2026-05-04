@@ -1,0 +1,114 @@
+{
+  "database_role": "source",
+  "errors": [],
+  "generated_at": "2026-05-04T00:00:00+00:00",
+  "include_schemas": [
+    "analytics",
+    "demo"
+  ],
+  "matview_indexes": [],
+  "matviews": [
+    {
+      "definition": "SELECT event_type, count(*) AS event_count FROM analytics.events GROUP BY event_type",
+      "geometry_columns": [],
+      "grants": [],
+      "has_geometry": false,
+      "name": "event_counts_mv",
+      "schema": "analytics"
+    }
+  ],
+  "schema_grants": {},
+  "source": {
+    "database": "sourcedb",
+    "host": "source-db",
+    "port": 5432
+  },
+  "tables": [
+    {
+      "columns": [
+        {
+          "attidentity": "d",
+          "default_sql": null,
+          "name": "user_id",
+          "nextval_sequences": [],
+          "not_null": true,
+          "type_sql": "integer",
+          "udt_name": "int4"
+        },
+        {
+          "attidentity": "",
+          "default_sql": null,
+          "name": "created_at",
+          "nextval_sequences": [],
+          "not_null": true,
+          "type_sql": "timestamp without time zone",
+          "udt_name": "timestamp"
+        }
+      ],
+      "estimated_bytes": 81920,
+      "estimated_rows": 1000,
+      "foreign_keys": [],
+      "geometry_columns": [],
+      "grants": [],
+      "has_geometry": false,
+      "indexes": [],
+      "partition": {
+        "children": [],
+        "is_partition_parent": false,
+        "partition_key": null
+      },
+      "primary_key": [
+        "user_id"
+      ],
+      "schema": "demo",
+      "table": "users"
+    },
+    {
+      "columns": [
+        {
+          "attidentity": "d",
+          "default_sql": null,
+          "name": "event_id",
+          "nextval_sequences": [],
+          "not_null": true,
+          "type_sql": "integer",
+          "udt_name": "int4"
+        },
+        {
+          "attidentity": "",
+          "default_sql": null,
+          "name": "event_ts",
+          "nextval_sequences": [],
+          "not_null": true,
+          "type_sql": "timestamp without time zone",
+          "udt_name": "timestamp"
+        }
+      ],
+      "estimated_bytes": 3538944,
+      "estimated_rows": 20000,
+      "foreign_keys": [],
+      "geometry_columns": [],
+      "grants": [],
+      "has_geometry": false,
+      "indexes": [
+        {
+          "cluster_statement": null,
+          "index_definition": "CREATE INDEX idx_events_event_ts ON analytics.events USING btree (event_ts)",
+          "index_name": "idx_events_event_ts"
+        }
+      ],
+      "partition": {
+        "children": [],
+        "is_partition_parent": false,
+        "partition_key": null
+      },
+      "primary_key": [
+        "event_id"
+      ],
+      "schema": "analytics",
+      "table": "events"
+    }
+  ],
+  "udfs": [],
+  "version": "v2"
+}
