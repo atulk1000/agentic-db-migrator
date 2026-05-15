@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
@@ -31,6 +29,7 @@ def _substitute_env_vars(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_substitute_env_vars(v) for v in obj]
     if isinstance(obj, str):
+
         def repl(match: re.Match) -> str:
             key = match.group(1)
             val = os.environ.get(key)
@@ -42,7 +41,7 @@ def _substitute_env_vars(obj: Any) -> Any:
     return obj
 
 
-def load_config(config_path: str | Path) -> Dict[str, Any]:
+def load_config(config_path: str | Path) -> dict[str, Any]:
     """
     Load YAML config and substitute ${ENV_VAR} placeholders.
     """
@@ -59,4 +58,3 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
 
     raw = yaml.safe_load(raw_text) or {}
     return _substitute_env_vars(raw)
-

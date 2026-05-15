@@ -60,7 +60,13 @@ def test_remote_demo_uses_shared_normalization(tmp_path, monkeypatch):
                     {"id": "step_0001", "op": "ensure_schema", "schema": "public"},
                     {"id": "step_0002", "op": "ensure_table", "schema": "public", "name": "users"},
                     {"id": "step_0003", "op": "copy_table", "schema": "public", "name": "users"},
-                    {"id": "step_0004", "op": "verify_table", "schema": "public", "name": "users", "mode": "sample_hash"},
+                    {
+                        "id": "step_0004",
+                        "op": "verify_table",
+                        "schema": "public",
+                        "name": "users",
+                        "mode": "sample_hash",
+                    },
                 ],
             }
         },
@@ -69,5 +75,7 @@ def test_remote_demo_uses_shared_normalization(tmp_path, monkeypatch):
     plan = remote_demo.generate_plan(str(manifest_path))
     assert plan["planner"] == "demo"
     assert plan["planner_metadata"]["mode"] == "remote_demo"
-    assert all(step.get("table") == "users" for step in plan["steps"] if step["op"] != "ensure_schema")
+    assert all(
+        step.get("table") == "users" for step in plan["steps"] if step["op"] != "ensure_schema"
+    )
     assert all("name" not in step for step in plan["steps"])

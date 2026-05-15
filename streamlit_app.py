@@ -2,10 +2,11 @@
 
 import contextlib
 import importlib
+import inspect
 import io
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import streamlit as st
 
@@ -29,16 +30,14 @@ from amo.core.planners.heuristic_planner import write_plan
 from amo.core.planners.models import validate_plan_document
 from amo.core.workflow_models import MigrationMode
 
-
 PLANNER_MODULES = {
     "heuristic": "amo.core.planners.heuristic_planner",
     "demo": "amo.core.planners.remote_demo",
     "gemini": "amo.core.planners.gemini",
     "openai": "amo.core.planners.openai",
-    "ollama": "amo.core.planners.ollama",
 }
 
-MIGRATION_MODES: List[MigrationMode] = [
+MIGRATION_MODES: list[MigrationMode] = [
     "safe_sync",
     "missing_only",
     "metadata_diff_only",
@@ -53,9 +52,20 @@ def _load_planner_module(planner: str):
     return importlib.import_module(mod_path)
 
 
-def _generate_plan(manifest_path: str, planner: str) -> dict:
+def _generate_plan(
+    manifest_path: str,
+    planner: str,
+    context_path: str | None = None,
+    objective: str | None = None,
+) -> dict:
     module = _load_planner_module(planner)
-    return validate_plan_document(module.generate_plan(manifest_path=manifest_path))
+    signature = inspect.signature(module.generate_plan)
+    kwargs = {"manifest_path": manifest_path}
+    if "context_path" in signature.parameters:
+        kwargs["context_path"] = context_path
+    if "objective" in signature.parameters:
+        kwargs["objective"] = objective
+    return validate_plan_document(module.generate_plan(**kwargs))
 
 
 def _default_analysis_dir() -> str:
@@ -86,7 +96,7 @@ def _session_defaults() -> None:
         st.session_state.setdefault(key, value)
 
 
-def _read_if_exists(path: str) -> Dict[str, Any] | None:
+def _read_if_exists(path: str) -> dict[str, Any] | None:
     if not path:
         return None
     p = Path(path)
@@ -103,8 +113,8 @@ def _analysis_artifact(name: str) -> str:
     return str(Path(st.session_state["analysis_dir"]) / name)
 
 
-def _step_counts(plan_obj: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    counts: Dict[str, int] = {}
+def _step_counts(plan_obj: dict[str, Any] | None) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
     if not plan_obj:
         return []
     for step in plan_obj.get("steps", []):
@@ -113,7 +123,7 @@ def _step_counts(plan_obj: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     return [{"op": op, "count": count} for op, count in sorted(counts.items())]
 
 
-def _summary_metric(summary_obj: Dict[str, Any] | None, key: str, fallback: int = 0) -> int:
+def _summary_metric(summary_obj: dict[str, Any] | None, key: str, fallback: int = 0) -> int:
     if not summary_obj:
         return fallback
     value = summary_obj.get(key)
@@ -124,7 +134,7 @@ def _summary_metric(summary_obj: Dict[str, Any] | None, key: str, fallback: int 
     return fallback
 
 
-def _table_recommendations(summary_obj: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+def _table_recommendations(summary_obj: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not summary_obj:
         return []
     recommendations = []
@@ -145,32 +155,46 @@ def _table_recommendations(summary_obj: Dict[str, Any] | None) -> List[Dict[str,
     return recommendations
 
 
-def _workflow_status_rows() -> List[Dict[str, Any]]:
+def _workflow_status_rows() -> list[dict[str, Any]]:
     return [
         {
             "step": "Analyze",
-            "status": "Done" if _artifact_exists(st.session_state["last_summary_path"]) else "Pending",
+            "status": (
+                "Done" if _artifact_exists(st.session_state["last_summary_path"]) else "Pending"
+            ),
             "path": st.session_state["last_summary_path"] or "-",
         },
         {
             "step": "Approve",
-            "status": "Done" if _artifact_exists(st.session_state["last_approval_path"]) else "Pending",
+            "status": (
+                "Done" if _artifact_exists(st.session_state["last_approval_path"]) else "Pending"
+            ),
             "path": st.session_state["last_approval_path"] or "-",
         },
         {
             "step": "Run",
-            "status": "Done" if _artifact_exists(st.session_state["last_state_path"]) else "Pending",
+            "status": (
+                "Done" if _artifact_exists(st.session_state["last_state_path"]) else "Pending"
+            ),
             "path": st.session_state["last_state_path"] or "-",
         },
         {
             "step": "Post Summary",
-            "status": "Done" if _artifact_exists(st.session_state["last_post_summary_path"]) else "Pending",
+            "status": (
+                "Done"
+                if _artifact_exists(st.session_state["last_post_summary_path"])
+                else "Pending"
+            ),
             "path": st.session_state["last_post_summary_path"] or "-",
         },
     ]
 
 
-def _render_overview(summary_obj: Dict[str, Any] | None, diff_obj: Dict[str, Any] | None, plan_obj: Dict[str, Any] | None) -> None:
+def _render_overview(
+    summary_obj: dict[str, Any] | None,
+    diff_obj: dict[str, Any] | None,
+    plan_obj: dict[str, Any] | None,
+) -> None:
     overview = (summary_obj or {}).get("overview", {})
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Source Tables", overview.get("source_tables", 0))
@@ -181,10 +205,22 @@ def _render_overview(summary_obj: Dict[str, Any] | None, diff_obj: Dict[str, Any
 
     if diff_obj:
         drift_rows = [
-            {"category": "missing_tables_in_target", "count": len(diff_obj.get("missing_tables_in_target", []))},
-            {"category": "extra_tables_in_target", "count": len(diff_obj.get("extra_tables_in_target", []))},
-            {"category": "table_metadata_mismatches", "count": len(diff_obj.get("table_metadata_mismatches", []))},
-            {"category": "missing_matviews_in_target", "count": len(diff_obj.get("missing_matviews_in_target", []))},
+            {
+                "category": "missing_tables_in_target",
+                "count": len(diff_obj.get("missing_tables_in_target", [])),
+            },
+            {
+                "category": "extra_tables_in_target",
+                "count": len(diff_obj.get("extra_tables_in_target", [])),
+            },
+            {
+                "category": "table_metadata_mismatches",
+                "count": len(diff_obj.get("table_metadata_mismatches", [])),
+            },
+            {
+                "category": "missing_matviews_in_target",
+                "count": len(diff_obj.get("missing_matviews_in_target", [])),
+            },
             {"category": "udf_differences", "count": len(diff_obj.get("udf_differences", []))},
         ]
         with st.expander("Drift Snapshot", expanded=False):
@@ -195,7 +231,7 @@ def _render_overview(summary_obj: Dict[str, Any] | None, diff_obj: Dict[str, Any
             st.dataframe(_step_counts(plan_obj), use_container_width=True, hide_index=True)
 
 
-def _render_pre_summary_block(summary_obj: Dict[str, Any]) -> None:
+def _render_pre_summary_block(summary_obj: dict[str, Any]) -> None:
     overview = summary_obj.get("overview", {})
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Copy Candidates", overview.get("tables_to_copy", 0))
@@ -209,7 +245,7 @@ def _render_pre_summary_block(summary_obj: Dict[str, Any]) -> None:
         st.dataframe(recommendations, use_container_width=True, hide_index=True)
 
 
-def _render_state_block(state_obj: Dict[str, Any]) -> None:
+def _render_state_block(state_obj: dict[str, Any]) -> None:
     completed = len(state_obj.get("completed", []))
     failed = len(state_obj.get("failed", []))
     skipped = len(state_obj.get("skipped", []))
@@ -223,7 +259,7 @@ def _render_state_block(state_obj: Dict[str, Any]) -> None:
         st.json(state_obj)
 
 
-def _render_post_summary_block(summary_obj: Dict[str, Any]) -> None:
+def _render_post_summary_block(summary_obj: dict[str, Any]) -> None:
     execution_overview = summary_obj.get("execution_overview", {})
     verification_summary = summary_obj.get("verification_summary", {})
     c1, c2, c3, c4 = st.columns(4)
@@ -236,7 +272,7 @@ def _render_post_summary_block(summary_obj: Dict[str, Any]) -> None:
         st.json(summary_obj)
 
 
-def _analyze(config_path: str, planner: str, mode: MigrationMode, out_dir: str) -> Dict[str, str]:
+def _analyze(config_path: str, planner: str, mode: MigrationMode, out_dir: str) -> dict[str, str]:
     load_env(".env")
     cfg = load_config(config_path)
 
@@ -259,7 +295,12 @@ def _analyze(config_path: str, planner: str, mode: MigrationMode, out_dir: str) 
     manifest_diff = diff_manifests(source_manifest, target_manifest)
     write_json(diff_path, manifest_diff)
 
-    plan_obj = _generate_plan(str(source_manifest_path), planner)
+    plan_obj = _generate_plan(
+        str(source_manifest_path),
+        planner,
+        context_path=str(diff_path),
+        objective=f"migration_mode={mode}",
+    )
     write_plan(plan_obj, plan_path)
 
     pre_summary = build_pre_migration_summary(
@@ -287,9 +328,9 @@ def _approve(
     mode: MigrationMode,
     approved_by: str,
     allow_destructive: bool,
-    include_tables: List[str],
-    exclude_tables: List[str],
-    approved_manual_review_items: List[str],
+    include_tables: list[str],
+    exclude_tables: list[str],
+    approved_manual_review_items: list[str],
     notes: str,
     out_path: str,
 ) -> str:
@@ -329,7 +370,9 @@ def _run(config_path: str, plan_path: str, approval_path: str, state_path: str, 
     return str(state_file)
 
 
-def _summarize_post(plan_path: str, state_path: str, pre_summary_path: str, out_path: str, report_path: str = "") -> str:
+def _summarize_post(
+    plan_path: str, state_path: str, pre_summary_path: str, out_path: str, report_path: str = ""
+) -> str:
     plan_obj = read_json(plan_path)
     state_obj = read_json(state_path)
     pre_summary_obj = read_json(pre_summary_path)
@@ -342,7 +385,9 @@ def _summarize_post(plan_path: str, state_path: str, pre_summary_path: str, out_
         pre_summary=pre_summary_obj,
     )
     write_json(out_path, summary)
-    Path(out_path).with_suffix(".md").write_text(render_post_migration_summary(summary), encoding="utf-8")
+    Path(out_path).with_suffix(".md").write_text(
+        render_post_migration_summary(summary), encoding="utf-8"
+    )
     return out_path
 
 
@@ -368,10 +413,18 @@ def main() -> None:
     with st.sidebar:
         st.header("Run Settings")
         config_path = st.text_input("Config path", value="config.yaml", key="sidebar_config_path")
-        planner = st.selectbox("Planner", options=list(PLANNER_MODULES), index=0, key="sidebar_planner")
+        planner = st.selectbox(
+            "Planner", options=list(PLANNER_MODULES), index=0, key="sidebar_planner"
+        )
         mode = st.selectbox("Migration mode", options=MIGRATION_MODES, index=0, key="sidebar_mode")
-        analysis_dir = st.text_input("Analysis output directory", value=st.session_state["analysis_dir"], key="sidebar_analysis_dir")
-        approved_by = st.text_input("Approved by", value="streamlit-user", key="sidebar_approved_by")
+        analysis_dir = st.text_input(
+            "Analysis output directory",
+            value=st.session_state["analysis_dir"],
+            key="sidebar_analysis_dir",
+        )
+        approved_by = st.text_input(
+            "Approved by", value="streamlit-user", key="sidebar_approved_by"
+        )
         fresh_run = st.checkbox("Fresh run", value=True, key="sidebar_fresh_run")
         st.markdown("### Workflow Status")
         st.dataframe(_workflow_status_rows(), use_container_width=True, hide_index=True)
@@ -387,10 +440,14 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Analyze")
-        st.write("Build source and target manifests, compute drift, generate a plan, and render a pre-migration summary.")
+        st.write(
+            "Build source and target manifests, compute drift, generate a plan, and render a pre-migration summary."
+        )
         if st.button("Run Analyze", type="primary", key="analyze_run_button"):
             try:
-                artifacts, stdout, stderr = _capture(_analyze, config_path, planner, mode, analysis_dir)
+                artifacts, stdout, stderr = _capture(
+                    _analyze, config_path, planner, mode, analysis_dir
+                )
                 st.session_state["analysis_dir"] = analysis_dir
                 st.session_state["last_plan_path"] = artifacts["plan"]
                 st.session_state["last_summary_path"] = artifacts["summary"]
@@ -407,7 +464,9 @@ def main() -> None:
 
     with tabs[1]:
         st.subheader("Review")
-        review_summary_path = st.text_input("Summary path", value=st.session_state["last_summary_path"], key="review_summary_path")
+        review_summary_path = st.text_input(
+            "Summary path", value=st.session_state["last_summary_path"], key="review_summary_path"
+        )
         summary_obj = _read_if_exists(review_summary_path)
         if summary_obj:
             _render_pre_summary_block(summary_obj)
@@ -418,8 +477,12 @@ def main() -> None:
 
     with tabs[2]:
         st.subheader("Approve")
-        plan_path = st.text_input("Plan path", value=st.session_state["last_plan_path"], key="approve_plan_path")
-        summary_path = st.text_input("Summary path", value=st.session_state["last_summary_path"], key="approve_summary_path")
+        plan_path = st.text_input(
+            "Plan path", value=st.session_state["last_plan_path"], key="approve_plan_path"
+        )
+        summary_path = st.text_input(
+            "Summary path", value=st.session_state["last_summary_path"], key="approve_summary_path"
+        )
         approval_path = st.text_input(
             "Approval output path",
             value=str(Path(st.session_state["analysis_dir"]) / "approval.json"),
@@ -427,11 +490,14 @@ def main() -> None:
         )
 
         summary_obj = _read_if_exists(summary_path)
-        table_options: List[str] = []
-        manual_review_options: List[str] = []
-        default_include: List[str] = []
+        table_options: list[str] = []
+        manual_review_options: list[str] = []
+        default_include: list[str] = []
         if summary_obj:
-            table_options = [f"{item['schema']}.{item['table']}" for item in summary_obj.get("table_recommendations", [])]
+            table_options = [
+                f"{item['schema']}.{item['table']}"
+                for item in summary_obj.get("table_recommendations", [])
+            ]
             default_include = [
                 f"{item['schema']}.{item['table']}"
                 for item in summary_obj.get("table_recommendations", [])
@@ -439,15 +505,24 @@ def main() -> None:
             ]
             manual_review_options = list(summary_obj.get("manual_review_required", []))
 
-        include_tables = st.multiselect("Included tables", options=table_options, default=default_include, key="approve_include_tables")
-        exclude_tables = st.multiselect("Excluded tables", options=table_options, default=[], key="approve_exclude_tables")
+        include_tables = st.multiselect(
+            "Included tables",
+            options=table_options,
+            default=default_include,
+            key="approve_include_tables",
+        )
+        exclude_tables = st.multiselect(
+            "Excluded tables", options=table_options, default=[], key="approve_exclude_tables"
+        )
         approve_manual_review_items = st.multiselect(
             "Approved manual-review items",
             options=manual_review_options,
             default=[],
             key="approve_manual_review_items",
         )
-        allow_destructive = st.checkbox("Allow destructive actions", value=False, key="approve_allow_destructive")
+        allow_destructive = st.checkbox(
+            "Allow destructive actions", value=False, key="approve_allow_destructive"
+        )
         notes = st.text_area("Approval notes", value="", key="approve_notes")
 
         if st.button("Create Approval", key="approve_create_button"):
@@ -474,14 +549,26 @@ def main() -> None:
 
     with tabs[3]:
         st.subheader("Run")
-        run_plan_path = st.text_input("Plan path ", value=st.session_state["last_plan_path"], key="run_plan_path")
-        run_approval_path = st.text_input("Approval path", value=st.session_state["last_approval_path"], key="run_approval_path")
-        default_state_path = str(Path("runs") / f"state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-        run_state_path = st.text_input("State output path", value=st.session_state.get("last_state_path") or default_state_path, key="run_state_path")
+        run_plan_path = st.text_input(
+            "Plan path ", value=st.session_state["last_plan_path"], key="run_plan_path"
+        )
+        run_approval_path = st.text_input(
+            "Approval path", value=st.session_state["last_approval_path"], key="run_approval_path"
+        )
+        default_state_path = str(
+            Path("runs") / f"state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        run_state_path = st.text_input(
+            "State output path",
+            value=st.session_state.get("last_state_path") or default_state_path,
+            key="run_state_path",
+        )
 
         if st.button("Execute Migration", key="run_execute_button"):
             try:
-                state_path, stdout, stderr = _capture(_run, config_path, run_plan_path, run_approval_path, run_state_path, fresh_run)
+                state_path, stdout, stderr = _capture(
+                    _run, config_path, run_plan_path, run_approval_path, run_state_path, fresh_run
+                )
                 st.session_state["last_state_path"] = state_path
                 st.session_state["flash_message"] = f"Run complete. State saved to {state_path}"
                 st.session_state["flash_kind"] = "success"
@@ -496,10 +583,22 @@ def main() -> None:
 
     with tabs[4]:
         st.subheader("Post-Migration Summary")
-        post_plan_path = st.text_input("Migration Plan File", value=st.session_state["last_plan_path"], key="post_plan_path")
-        post_state_path = st.text_input("Run State File", value=st.session_state["last_state_path"], key="post_state_path")
-        post_pre_summary_path = st.text_input("Pre-Migration Summary File", value=st.session_state["last_summary_path"], key="post_pre_summary_path")
-        post_report_path = st.text_input("Verification Report File (Optional)", value=st.session_state["last_report_path"], key="post_report_path")
+        post_plan_path = st.text_input(
+            "Migration Plan File", value=st.session_state["last_plan_path"], key="post_plan_path"
+        )
+        post_state_path = st.text_input(
+            "Run State File", value=st.session_state["last_state_path"], key="post_state_path"
+        )
+        post_pre_summary_path = st.text_input(
+            "Pre-Migration Summary File",
+            value=st.session_state["last_summary_path"],
+            key="post_pre_summary_path",
+        )
+        post_report_path = st.text_input(
+            "Verification Report File (Optional)",
+            value=st.session_state["last_report_path"],
+            key="post_report_path",
+        )
         post_summary_path = st.text_input(
             "Post-Migration Summary Output File",
             value=str(Path(st.session_state["analysis_dir"]) / "post_migration_summary.json"),
@@ -531,12 +630,36 @@ def main() -> None:
     with tabs[5]:
         st.subheader("Artifacts")
         artifact_rows = [
-            {"artifact": "Analysis Directory", "path": st.session_state["analysis_dir"], "exists": Path(st.session_state["analysis_dir"]).exists()},
-            {"artifact": "Plan", "path": st.session_state["last_plan_path"] or "-", "exists": _artifact_exists(st.session_state["last_plan_path"])},
-            {"artifact": "Pre-Migration Summary", "path": st.session_state["last_summary_path"] or "-", "exists": _artifact_exists(st.session_state["last_summary_path"])},
-            {"artifact": "Approval", "path": st.session_state["last_approval_path"] or "-", "exists": _artifact_exists(st.session_state["last_approval_path"])},
-            {"artifact": "Run State", "path": st.session_state["last_state_path"] or "-", "exists": _artifact_exists(st.session_state["last_state_path"])},
-            {"artifact": "Post Summary", "path": st.session_state["last_post_summary_path"] or "-", "exists": _artifact_exists(st.session_state["last_post_summary_path"])},
+            {
+                "artifact": "Analysis Directory",
+                "path": st.session_state["analysis_dir"],
+                "exists": Path(st.session_state["analysis_dir"]).exists(),
+            },
+            {
+                "artifact": "Plan",
+                "path": st.session_state["last_plan_path"] or "-",
+                "exists": _artifact_exists(st.session_state["last_plan_path"]),
+            },
+            {
+                "artifact": "Pre-Migration Summary",
+                "path": st.session_state["last_summary_path"] or "-",
+                "exists": _artifact_exists(st.session_state["last_summary_path"]),
+            },
+            {
+                "artifact": "Approval",
+                "path": st.session_state["last_approval_path"] or "-",
+                "exists": _artifact_exists(st.session_state["last_approval_path"]),
+            },
+            {
+                "artifact": "Run State",
+                "path": st.session_state["last_state_path"] or "-",
+                "exists": _artifact_exists(st.session_state["last_state_path"]),
+            },
+            {
+                "artifact": "Post Summary",
+                "path": st.session_state["last_post_summary_path"] or "-",
+                "exists": _artifact_exists(st.session_state["last_post_summary_path"]),
+            },
         ]
         st.dataframe(artifact_rows, use_container_width=True, hide_index=True)
         latest_plan = _read_if_exists(st.session_state["last_plan_path"])
@@ -547,5 +670,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

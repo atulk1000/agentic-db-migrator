@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 import typer
 
@@ -27,7 +27,6 @@ from amo.core.planners.heuristic_planner import write_plan
 from amo.core.planners.models import validate_plan_document
 from amo.core.workflow_models import MigrationMode
 
-
 app = typer.Typer()
 
 PLANNER_MODULES = {
@@ -35,20 +34,30 @@ PLANNER_MODULES = {
     "demo": "amo.core.planners.remote_demo",
     "gemini": "amo.core.planners.gemini",
     "openai": "amo.core.planners.openai",
-    "ollama": "amo.core.planners.ollama",
 }
 
 
 def _load_planner_module(planner: str):
     mod_path = PLANNER_MODULES.get(planner)
     if not mod_path:
-        raise typer.BadParameter(f"Unknown planner: {planner}. Use heuristic|demo|gemini|openai|ollama")
+        raise typer.BadParameter(f"Unknown planner: {planner}. Use heuristic|demo|gemini|openai")
     return importlib.import_module(mod_path)
 
 
-def _generate_plan(manifest_path: str, planner: str) -> dict:
+def _generate_plan(
+    manifest_path: str,
+    planner: str,
+    context_path: str | None = None,
+    objective: str | None = None,
+) -> dict:
     module = _load_planner_module(planner)
-    return validate_plan_document(module.generate_plan(manifest_path=manifest_path))
+    signature = inspect.signature(module.generate_plan)
+    kwargs = {"manifest_path": manifest_path}
+    if "context_path" in signature.parameters:
+        kwargs["context_path"] = context_path
+    if "objective" in signature.parameters:
+        kwargs["objective"] = objective
+    return validate_plan_document(module.generate_plan(**kwargs))
 
 
 def _default_analysis_dir() -> str:
@@ -78,7 +87,9 @@ def discover(
 @app.command()
 def plan(
     manifest: str = typer.Option("manifest.json", help="Input manifest path"),
-    planner: str = typer.Option("heuristic", help="Planner to use: heuristic | demo | gemini | openai | ollama"),
+    planner: str = typer.Option(
+        "heuristic", help="Planner to use: heuristic | demo | gemini | openai"
+    ),
     out: str = typer.Option("plan.json", help="Output plan path"),
 ):
     plan_obj = _generate_plan(manifest_path=manifest, planner=planner)
@@ -89,7 +100,9 @@ def plan(
 @app.command()
 def analyze(
     config: str = typer.Option("config.yaml", help="Path to config YAML"),
-    planner: str = typer.Option("heuristic", help="Planner to use: heuristic | demo | gemini | openai | ollama"),
+    planner: str = typer.Option(
+        "heuristic", help="Planner to use: heuristic | demo | gemini | openai"
+    ),
     mode: MigrationMode = typer.Option("safe_sync", help="Recommended migration mode"),
     out_dir: str = typer.Option(None, help="Output directory for analysis artifacts"),
 ):
@@ -115,7 +128,12 @@ def analyze(
     manifest_diff = diff_manifests(source_manifest, target_manifest)
     write_json(diff_path, manifest_diff)
 
-    plan_obj = _generate_plan(manifest_path=str(source_manifest_path), planner=planner)
+    plan_obj = _generate_plan(
+        manifest_path=str(source_manifest_path),
+        planner=planner,
+        context_path=str(diff_path),
+        objective=f"migration_mode={mode}",
+    )
     write_plan(plan_obj, plan_path)
 
     pre_summary = build_pre_migration_summary(
@@ -156,14 +174,18 @@ def approve(
         "--allow-destructive",
         help="Allow running manual-review items that require destructive approval",
     ),
-    include_table: Optional[List[str]] = typer.Option(None, "--include-table", help="Fully qualified table to include"),
-    exclude_table: Optional[List[str]] = typer.Option(None, "--exclude-table", help="Fully qualified table to exclude"),
-    approve_manual_review: Optional[List[str]] = typer.Option(
+    include_table: list[str] | None = typer.Option(
+        None, "--include-table", help="Fully qualified table to include"
+    ),
+    exclude_table: list[str] | None = typer.Option(
+        None, "--exclude-table", help="Fully qualified table to exclude"
+    ),
+    approve_manual_review: list[str] | None = typer.Option(
         None,
         "--approve-manual-review",
         help="Fully qualified table to allow despite manual-review routing",
     ),
-    notes: Optional[str] = typer.Option(None, help="Optional approval notes"),
+    notes: str | None = typer.Option(None, help="Optional approval notes"),
 ):
     approval = build_approval_document(
         plan_path=plan,
@@ -184,7 +206,7 @@ def approve(
 def run(
     config: str = typer.Option("config.yaml", help="Path to config YAML"),
     plan: str = typer.Option("plan.json", help="Path to plan JSON"),
-    state: Optional[str] = typer.Option(
+    state: str | None = typer.Option(
         None,
         "--state",
         help="Checkpoint state file. If omitted, a timestamped file is created under runs/.",
@@ -194,17 +216,17 @@ def run(
         "--fresh",
         help="Start a fresh run (ignore existing state file if provided).",
     ),
-    truncate_first: Optional[bool] = typer.Option(
+    truncate_first: bool | None = typer.Option(
         None,
         "--truncate/--no-truncate",
         help="Truncate target tables before COPY (overrides engine.copy.truncate_first)",
     ),
-    allow_destructive: Optional[bool] = typer.Option(
+    allow_destructive: bool | None = typer.Option(
         None,
         "--allow-destructive/--no-allow-destructive",
         help="Allow destructive ops like TRUNCATE (overrides engine.allow_destructive)",
     ),
-    approval: Optional[str] = typer.Option(
+    approval: str | None = typer.Option(
         None,
         "--approval",
         help="Approval artifact generated by amo approve",
@@ -270,8 +292,10 @@ def summarize_post(
     plan: str = typer.Option("plan.json", help="Path to plan JSON"),
     state: str = typer.Option("state.json", help="Path to execution state JSON"),
     out: str = typer.Option("post_migration_summary.json", help="Output summary path"),
-    report: Optional[str] = typer.Option(None, help="Optional verification report JSON"),
-    pre_summary: Optional[str] = typer.Option(None, "--pre-summary", help="Optional pre-migration summary JSON"),
+    report: str | None = typer.Option(None, help="Optional verification report JSON"),
+    pre_summary: str | None = typer.Option(
+        None, "--pre-summary", help="Optional pre-migration summary JSON"
+    ),
 ):
     plan_obj = read_json(plan)
     state_obj = read_json(state)

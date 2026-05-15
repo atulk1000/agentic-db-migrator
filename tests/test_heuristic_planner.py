@@ -24,11 +24,25 @@ def test_partitioned_tables_are_grouped_without_duplicate_child_work(tmp_path):
                     "is_partition_parent": True,
                     "partition_key": "RANGE (created_at)",
                     "children": [
-                        {"schema": "public", "table": "events_2026", "bound": "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}
+                        {
+                            "schema": "public",
+                            "table": "events_2026",
+                            "bound": "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+                        }
                     ],
                 },
-                "foreign_keys": [{"name": "events_account_fk", "definition": "FOREIGN KEY (account_id) REFERENCES public.accounts(id)"}],
-                "indexes": [{"index_name": "events_created_at_idx", "index_definition": "CREATE INDEX events_created_at_idx ON public.events (created_at)"}],
+                "foreign_keys": [
+                    {
+                        "name": "events_account_fk",
+                        "definition": "FOREIGN KEY (account_id) REFERENCES public.accounts(id)",
+                    }
+                ],
+                "indexes": [
+                    {
+                        "index_name": "events_created_at_idx",
+                        "index_definition": "CREATE INDEX events_created_at_idx ON public.events (created_at)",
+                    }
+                ],
             },
             {
                 "schema": "public",
@@ -75,7 +89,12 @@ def test_heuristic_plan_emits_grants_matview_staging_and_maintenance_steps(tmp_p
         "include_schemas": ["public"],
         "schema_grants": {
             "public": [
-                {"grantee": "app_user", "privilege_type": "USAGE", "object_type": "schema", "schema": "public"}
+                {
+                    "grantee": "app_user",
+                    "privilege_type": "USAGE",
+                    "object_type": "schema",
+                    "schema": "public",
+                }
             ]
         },
         "tables": [
@@ -87,7 +106,13 @@ def test_heuristic_plan_emits_grants_matview_staging_and_maintenance_steps(tmp_p
                 "primary_key": ["id"],
                 "has_geometry": False,
                 "geometry_columns": [],
-                "columns": [{"name": "created_at", "type_sql": "timestamp without time zone", "udt_name": "timestamp"}],
+                "columns": [
+                    {
+                        "name": "created_at",
+                        "type_sql": "timestamp without time zone",
+                        "udt_name": "timestamp",
+                    }
+                ],
                 "partition": {"is_partition_parent": False, "partition_key": None, "children": []},
                 "foreign_keys": [],
                 "indexes": [],

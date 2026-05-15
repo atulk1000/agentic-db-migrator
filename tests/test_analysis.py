@@ -28,7 +28,8 @@ def _table(
         "primary_key": primary_key or [],
         "has_geometry": False,
         "columns": columns,
-        "partition": partition or {"is_partition_parent": False, "partition_key": None, "children": []},
+        "partition": partition
+        or {"is_partition_parent": False, "partition_key": None, "children": []},
         "foreign_keys": foreign_keys or [],
         "indexes": indexes or [],
     }
@@ -59,37 +60,124 @@ def _plan() -> dict:
             {"id": "step_0001", "op": "ensure_schema", "schema": "analytics"},
             {"id": "step_0002", "op": "ensure_schema", "schema": "public"},
             {"id": "step_0003", "op": "ensure_table", "schema": "analytics", "table": "events"},
-            {"id": "step_0004", "op": "copy_table", "schema": "analytics", "table": "events", "validate": {"rowcount": True}},
+            {
+                "id": "step_0004",
+                "op": "copy_table",
+                "schema": "analytics",
+                "table": "events",
+                "validate": {"rowcount": True},
+            },
             {"id": "step_0005", "op": "sync_sequences", "schema": "analytics", "table": "events"},
-            {"id": "step_0006", "op": "verify_table", "schema": "analytics", "table": "events", "validate": {"rowcount": True}},
+            {
+                "id": "step_0006",
+                "op": "verify_table",
+                "schema": "analytics",
+                "table": "events",
+                "validate": {"rowcount": True},
+            },
             {"id": "step_0007", "op": "ensure_table", "schema": "public", "table": "users"},
-            {"id": "step_0008", "op": "copy_table", "schema": "public", "table": "users", "validate": {"rowcount": True}},
+            {
+                "id": "step_0008",
+                "op": "copy_table",
+                "schema": "public",
+                "table": "users",
+                "validate": {"rowcount": True},
+            },
             {"id": "step_0009", "op": "sync_sequences", "schema": "public", "table": "users"},
-            {"id": "step_0010", "op": "verify_table", "schema": "public", "table": "users", "validate": {"rowcount": True}},
+            {
+                "id": "step_0010",
+                "op": "verify_table",
+                "schema": "public",
+                "table": "users",
+                "validate": {"rowcount": True},
+            },
             {"id": "step_0011", "op": "ensure_table", "schema": "public", "table": "orders"},
-            {"id": "step_0012", "op": "copy_table", "schema": "public", "table": "orders", "validate": {"rowcount": True}},
-            {"id": "step_0013", "op": "create_indexes", "schema": "public", "table": "orders", "indexes": []},
-            {"id": "step_0014", "op": "verify_table", "schema": "public", "table": "orders", "validate": {"rowcount": True}},
+            {
+                "id": "step_0012",
+                "op": "copy_table",
+                "schema": "public",
+                "table": "orders",
+                "validate": {"rowcount": True},
+            },
+            {
+                "id": "step_0013",
+                "op": "create_indexes",
+                "schema": "public",
+                "table": "orders",
+                "indexes": [],
+            },
+            {
+                "id": "step_0014",
+                "op": "verify_table",
+                "schema": "public",
+                "table": "orders",
+                "validate": {"rowcount": True},
+            },
             {
                 "id": "step_0015",
                 "op": "add_fks",
                 "schema": "public",
-                "fks": [{"schema": "public", "table": "orders", "name": "orders_user_id_fkey", "definition": "FOREIGN KEY (user_id) REFERENCES public.users(id)"}],
+                "fks": [
+                    {
+                        "schema": "public",
+                        "table": "orders",
+                        "name": "orders_user_id_fkey",
+                        "definition": "FOREIGN KEY (user_id) REFERENCES public.users(id)",
+                    }
+                ],
             },
         ],
     }
 
 
 def test_diff_and_pre_summary_surface_transfer_strategy_and_manual_review():
-    int_col = {"name": "id", "type_sql": "integer", "udt_name": "int4", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []}
-    ts_col = {"name": "event_ts", "type_sql": "timestamp without time zone", "udt_name": "timestamp", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []}
-    amount_int = {"name": "amount", "type_sql": "integer", "udt_name": "int4", "not_null": False, "attidentity": "", "default_sql": None, "nextval_sequences": []}
-    amount_text = {"name": "amount", "type_sql": "text", "udt_name": "text", "not_null": False, "attidentity": "", "default_sql": None, "nextval_sequences": []}
+    int_col = {
+        "name": "id",
+        "type_sql": "integer",
+        "udt_name": "int4",
+        "not_null": True,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
+    ts_col = {
+        "name": "event_ts",
+        "type_sql": "timestamp without time zone",
+        "udt_name": "timestamp",
+        "not_null": True,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
+    amount_int = {
+        "name": "amount",
+        "type_sql": "integer",
+        "udt_name": "int4",
+        "not_null": False,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
+    amount_text = {
+        "name": "amount",
+        "type_sql": "text",
+        "udt_name": "text",
+        "not_null": False,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
 
     source_manifest = _manifest(
         [
             _table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=["id"]),
-            _table("public", "orders", estimated_rows=200000, columns=[int_col, amount_int], primary_key=["id"]),
+            _table(
+                "public",
+                "orders",
+                estimated_rows=200000,
+                columns=[int_col, amount_int],
+                primary_key=["id"],
+            ),
             _table(
                 "analytics",
                 "events",
@@ -99,7 +187,13 @@ def test_diff_and_pre_summary_surface_transfer_strategy_and_manual_review():
                 partition={
                     "is_partition_parent": True,
                     "partition_key": "RANGE (event_ts)",
-                    "children": [{"schema": "analytics", "table": "events_2026", "bound": "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}],
+                    "children": [
+                        {
+                            "schema": "analytics",
+                            "table": "events_2026",
+                            "bound": "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+                        }
+                    ],
                 },
             ),
         ]
@@ -107,7 +201,13 @@ def test_diff_and_pre_summary_surface_transfer_strategy_and_manual_review():
     target_manifest = _manifest(
         [
             _table("public", "users", estimated_rows=900, columns=[int_col], primary_key=["id"]),
-            _table("public", "orders", estimated_rows=180000, columns=[int_col, amount_text], primary_key=["id"]),
+            _table(
+                "public",
+                "orders",
+                estimated_rows=180000,
+                columns=[int_col, amount_text],
+                primary_key=["id"],
+            ),
             _table("public", "legacy", estimated_rows=100, columns=[int_col], primary_key=["id"]),
         ]
     )
@@ -122,7 +222,9 @@ def test_diff_and_pre_summary_surface_transfer_strategy_and_manual_review():
         "metadata_diff": 1,
     }
 
-    summary = build_pre_migration_summary(source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync")
+    summary = build_pre_migration_summary(
+        source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync"
+    )
     recs = {(item["schema"], item["table"]): item for item in summary["table_recommendations"]}
 
     assert recs[("public", "orders")]["action"] == "manual_review"
@@ -138,33 +240,130 @@ def test_diff_and_pre_summary_surface_transfer_strategy_and_manual_review():
 def test_filter_plan_for_approval_keeps_only_approved_tables(tmp_path):
     source_manifest = _manifest(
         [
-            _table("public", "users", estimated_rows=1000, columns=[{"name": "id", "type_sql": "integer", "udt_name": "int4", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []}], primary_key=["id"]),
-            _table("public", "orders", estimated_rows=200000, columns=[{"name": "id", "type_sql": "integer", "udt_name": "int4", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []}], primary_key=["id"]),
+            _table(
+                "public",
+                "users",
+                estimated_rows=1000,
+                columns=[
+                    {
+                        "name": "id",
+                        "type_sql": "integer",
+                        "udt_name": "int4",
+                        "not_null": True,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    }
+                ],
+                primary_key=["id"],
+            ),
+            _table(
+                "public",
+                "orders",
+                estimated_rows=200000,
+                columns=[
+                    {
+                        "name": "id",
+                        "type_sql": "integer",
+                        "udt_name": "int4",
+                        "not_null": True,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    }
+                ],
+                primary_key=["id"],
+            ),
             _table(
                 "analytics",
                 "events",
                 estimated_rows=800000,
                 columns=[
-                    {"name": "id", "type_sql": "integer", "udt_name": "int4", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []},
-                    {"name": "event_ts", "type_sql": "timestamp without time zone", "udt_name": "timestamp", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []},
+                    {
+                        "name": "id",
+                        "type_sql": "integer",
+                        "udt_name": "int4",
+                        "not_null": True,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    },
+                    {
+                        "name": "event_ts",
+                        "type_sql": "timestamp without time zone",
+                        "udt_name": "timestamp",
+                        "not_null": True,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    },
                 ],
                 primary_key=["id"],
                 partition={
                     "is_partition_parent": True,
                     "partition_key": "RANGE (event_ts)",
-                    "children": [{"schema": "analytics", "table": "events_2026", "bound": "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}],
+                    "children": [
+                        {
+                            "schema": "analytics",
+                            "table": "events_2026",
+                            "bound": "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+                        }
+                    ],
                 },
             ),
         ]
     )
     target_manifest = _manifest(
         [
-            _table("public", "users", estimated_rows=1000, columns=[{"name": "id", "type_sql": "integer", "udt_name": "int4", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []}], primary_key=["id"]),
-            _table("public", "orders", estimated_rows=200000, columns=[{"name": "id", "type_sql": "integer", "udt_name": "int4", "not_null": True, "attidentity": "", "default_sql": None, "nextval_sequences": []}, {"name": "amount", "type_sql": "text", "udt_name": "text", "not_null": False, "attidentity": "", "default_sql": None, "nextval_sequences": []}], primary_key=["id"]),
+            _table(
+                "public",
+                "users",
+                estimated_rows=1000,
+                columns=[
+                    {
+                        "name": "id",
+                        "type_sql": "integer",
+                        "udt_name": "int4",
+                        "not_null": True,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    }
+                ],
+                primary_key=["id"],
+            ),
+            _table(
+                "public",
+                "orders",
+                estimated_rows=200000,
+                columns=[
+                    {
+                        "name": "id",
+                        "type_sql": "integer",
+                        "udt_name": "int4",
+                        "not_null": True,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    },
+                    {
+                        "name": "amount",
+                        "type_sql": "text",
+                        "udt_name": "text",
+                        "not_null": False,
+                        "attidentity": "",
+                        "default_sql": None,
+                        "nextval_sequences": [],
+                    },
+                ],
+                primary_key=["id"],
+            ),
         ]
     )
     manifest_diff = diff_manifests(source_manifest, target_manifest)
-    pre_summary = build_pre_migration_summary(source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync")
+    pre_summary = build_pre_migration_summary(
+        source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync"
+    )
 
     plan_path = tmp_path / "plan.json"
     summary_path = tmp_path / "summary.json"
@@ -180,7 +379,9 @@ def test_filter_plan_for_approval_keeps_only_approved_tables(tmp_path):
     )
 
     filtered = filter_plan_for_approval(_plan(), pre_summary, approval)
-    step_pairs = {(step.get("op"), step.get("schema"), step.get("table")) for step in filtered["steps"]}
+    step_pairs = {
+        (step.get("op"), step.get("schema"), step.get("table")) for step in filtered["steps"]
+    }
 
     assert ("ensure_schema", "public", None) in step_pairs
     assert ("ensure_schema", "analytics", None) in step_pairs

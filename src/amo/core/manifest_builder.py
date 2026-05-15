@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import psycopg2
 
@@ -20,7 +19,7 @@ DEFAULT_SYSTEM_TABLES = {
 _NEXTVAL_RE = re.compile(r"nextval\('([^']+)'\s*(?:::regclass)?\)", re.IGNORECASE)
 
 
-def _dsn_from_cfg(db_cfg: Dict[str, Any]) -> str:
+def _dsn_from_cfg(db_cfg: dict[str, Any]) -> str:
     return (
         f"host={db_cfg['host']} "
         f"port={db_cfg.get('port', 5432)} "
@@ -30,12 +29,12 @@ def _dsn_from_cfg(db_cfg: Dict[str, Any]) -> str:
     )
 
 
-def _fetchall(cur, query: str, params: Tuple[Any, ...] = ()) -> List[tuple]:
+def _fetchall(cur, query: str, params: tuple[Any, ...] = ()) -> list[tuple]:
     cur.execute(query, params)
     return cur.fetchall()
 
 
-def _get_tables_in_schema(cur, schema: str) -> List[str]:
+def _get_tables_in_schema(cur, schema: str) -> list[str]:
     rows = _fetchall(
         cur,
         """
@@ -50,7 +49,7 @@ def _get_tables_in_schema(cur, schema: str) -> List[str]:
     return [r[0] for r in rows]
 
 
-def _get_candidate_schemas(cur) -> List[str]:
+def _get_candidate_schemas(cur) -> list[str]:
     rows = _fetchall(
         cur,
         """
@@ -64,7 +63,7 @@ def _get_candidate_schemas(cur) -> List[str]:
     return [r[0] for r in rows]
 
 
-def _get_table_relkind(cur, schema: str, table: str) -> Optional[str]:
+def _get_table_relkind(cur, schema: str, table: str) -> str | None:
     cur.execute(
         """
         SELECT c.relkind
@@ -78,7 +77,7 @@ def _get_table_relkind(cur, schema: str, table: str) -> Optional[str]:
     return row[0] if row else None
 
 
-def _get_total_relation_size(cur, schema: str, table: str) -> Optional[int]:
+def _get_total_relation_size(cur, schema: str, table: str) -> int | None:
     # regclass accepts quoted identifier strings
     qname = f'"{schema}"."{table}"'
     cur.execute("SELECT pg_total_relation_size(%s::regclass)", (qname,))
@@ -86,7 +85,7 @@ def _get_total_relation_size(cur, schema: str, table: str) -> Optional[int]:
     return int(row[0]) if row and row[0] is not None else None
 
 
-def _estimate_rows_pg_stats(cur, schema: str, table: str) -> Optional[int]:
+def _estimate_rows_pg_stats(cur, schema: str, table: str) -> int | None:
     cur.execute(
         """
         SELECT s.n_live_tup::bigint
@@ -101,7 +100,7 @@ def _estimate_rows_pg_stats(cur, schema: str, table: str) -> Optional[int]:
     return int(row[0])
 
 
-def _estimate_relation_rows(cur, schema: str, name: str) -> Optional[int]:
+def _estimate_relation_rows(cur, schema: str, name: str) -> int | None:
     cur.execute(
         """
         SELECT c.reltuples::bigint
@@ -118,7 +117,7 @@ def _estimate_relation_rows(cur, schema: str, name: str) -> Optional[int]:
     return int(row[0])
 
 
-def _get_columns_pg(cur, schema: str, table: str) -> List[Dict[str, Any]]:
+def _get_columns_pg(cur, schema: str, table: str) -> list[dict[str, Any]]:
     """
     DDL-quality column metadata:
       - type_sql: pg_catalog.format_type
@@ -151,7 +150,7 @@ def _get_columns_pg(cur, schema: str, table: str) -> List[Dict[str, Any]]:
         (schema, table),
     )
 
-    cols: List[Dict[str, Any]] = []
+    cols: list[dict[str, Any]] = []
     for col_name, type_sql, udt_name, not_null, attidentity, default_sql in rows:
         seqs = _NEXTVAL_RE.findall(default_sql or "")
         cols.append(
@@ -168,7 +167,7 @@ def _get_columns_pg(cur, schema: str, table: str) -> List[Dict[str, Any]]:
     return cols
 
 
-def _get_primary_key_columns(cur, schema: str, table: str) -> List[str]:
+def _get_primary_key_columns(cur, schema: str, table: str) -> list[str]:
     rows = _fetchall(
         cur,
         """
@@ -188,15 +187,15 @@ def _get_primary_key_columns(cur, schema: str, table: str) -> List[str]:
     return [r[0] for r in rows]
 
 
-def _has_geometry(cols: List[Dict[str, Any]]) -> bool:
+def _has_geometry(cols: list[dict[str, Any]]) -> bool:
     return any(c.get("udt_name") == "geometry" for c in cols)
 
 
-def _geometry_columns(cols: List[Dict[str, Any]]) -> List[str]:
+def _geometry_columns(cols: list[dict[str, Any]]) -> list[str]:
     return [c["name"] for c in cols if c.get("udt_name") == "geometry"]
 
 
-def _get_partition_info(cur, schema: str, table: str) -> Dict[str, Any]:
+def _get_partition_info(cur, schema: str, table: str) -> dict[str, Any]:
     """
     Returns:
       {
@@ -247,7 +246,7 @@ def _get_partition_info(cur, schema: str, table: str) -> Dict[str, Any]:
     return {"is_partition_parent": True, "partition_key": partkey, "children": children}
 
 
-def _get_foreign_keys(cur, schema: str, table: str) -> List[Dict[str, Any]]:
+def _get_foreign_keys(cur, schema: str, table: str) -> list[dict[str, Any]]:
     """
     Returns list of FK constraints on (schema.table):
       {name, definition, ref_schema, ref_table}
@@ -276,7 +275,7 @@ def _get_foreign_keys(cur, schema: str, table: str) -> List[Dict[str, Any]]:
     return [{"name": r[0], "ref_schema": r[1], "ref_table": r[2], "definition": r[3]} for r in rows]
 
 
-def _get_non_pk_indexes(cur, schema: str, table: str) -> List[Dict[str, Any]]:
+def _get_non_pk_indexes(cur, schema: str, table: str) -> list[dict[str, Any]]:
     """
     Returns non-PK, non-constraint-backed index definitions for a table.
     """
@@ -315,7 +314,7 @@ def _get_non_pk_indexes(cur, schema: str, table: str) -> List[Dict[str, Any]]:
     return idxs
 
 
-def _get_matviews(cur, schema: str) -> List[Dict[str, Any]]:
+def _get_matviews(cur, schema: str) -> list[dict[str, Any]]:
     rows = _fetchall(
         cur,
         """
@@ -346,7 +345,7 @@ def _get_matviews(cur, schema: str) -> List[Dict[str, Any]]:
     return matviews
 
 
-def _get_matview_indexes(cur, schema: str) -> List[Dict[str, Any]]:
+def _get_matview_indexes(cur, schema: str) -> list[dict[str, Any]]:
     rows = _fetchall(
         cur,
         """
@@ -384,7 +383,7 @@ def _get_matview_indexes(cur, schema: str) -> List[Dict[str, Any]]:
     ]
 
 
-def _get_udfs(cur, schema: str) -> List[Dict[str, Any]]:
+def _get_udfs(cur, schema: str) -> list[dict[str, Any]]:
     rows = _fetchall(
         cur,
         """
@@ -412,7 +411,7 @@ def _get_udfs(cur, schema: str) -> List[Dict[str, Any]]:
     return [{"schema": r[0], "name": r[1], "create_statement": r[2]} for r in rows]
 
 
-def _get_schema_grants(cur, schema: str) -> List[Dict[str, Any]]:
+def _get_schema_grants(cur, schema: str) -> list[dict[str, Any]]:
     rows = _fetchall(
         cur,
         """
@@ -433,10 +432,13 @@ def _get_schema_grants(cur, schema: str) -> List[Dict[str, Any]]:
         """,
         (schema,),
     )
-    return [{"grantee": r[0], "privilege_type": r[1], "object_type": "schema", "schema": schema} for r in rows]
+    return [
+        {"grantee": r[0], "privilege_type": r[1], "object_type": "schema", "schema": schema}
+        for r in rows
+    ]
 
 
-def _get_relation_grants(cur, schema: str, name: str) -> List[Dict[str, Any]]:
+def _get_relation_grants(cur, schema: str, name: str) -> list[dict[str, Any]]:
     rows = _fetchall(
         cur,
         """
@@ -476,30 +478,31 @@ def _get_relation_grants(cur, schema: str, name: str) -> List[Dict[str, Any]]:
     ]
 
 
-def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any]:
+def build_manifest(cfg: dict[str, Any], db_key: str = "source") -> dict[str, Any]:
     migration_cfg = cfg.get("migration", {})
-    include_schemas: List[str] = migration_cfg.get("include_schemas", [])
-    exclude_schemas: List[str] = migration_cfg.get("exclude_schemas", [])
-    exclude_tables: List[str] = migration_cfg.get("exclude_tables", [])
-    exclude_suffixes: List[str] = migration_cfg.get("exclude_suffixes", [])
+    include_schemas: list[str] = migration_cfg.get("include_schemas", [])
+    exclude_schemas: list[str] = migration_cfg.get("exclude_schemas", [])
+    exclude_tables: list[str] = migration_cfg.get("exclude_tables", [])
+    exclude_suffixes: list[str] = migration_cfg.get("exclude_suffixes", [])
     system_tables = set(migration_cfg.get("system_tables", list(DEFAULT_SYSTEM_TABLES)))
 
     db_cfg = cfg[db_key]
     dsn = _dsn_from_cfg(db_cfg)
 
-    discovered_tables: List[Dict[str, Any]] = []
-    discovered_matviews: List[Dict[str, Any]] = []
-    discovered_mv_indexes: List[Dict[str, Any]] = []
-    discovered_udfs: List[Dict[str, Any]] = []
-    discovered_schema_grants: Dict[str, List[Dict[str, Any]]] = {}
-    errors: List[Dict[str, str]] = []
+    discovered_tables: list[dict[str, Any]] = []
+    discovered_matviews: list[dict[str, Any]] = []
+    discovered_mv_indexes: list[dict[str, Any]] = []
+    discovered_udfs: list[dict[str, Any]] = []
+    discovered_schema_grants: dict[str, list[dict[str, Any]]] = {}
+    errors: list[dict[str, str]] = []
 
     with psycopg2.connect(dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
             if not include_schemas:
                 include_schemas = [
-                    schema for schema in _get_candidate_schemas(cur)
+                    schema
+                    for schema in _get_candidate_schemas(cur)
                     if schema not in exclude_schemas
                 ]
 
@@ -580,5 +583,5 @@ def build_manifest(cfg: Dict[str, Any], db_key: str = "source") -> Dict[str, Any
     }
 
 
-def write_manifest(manifest: Dict[str, Any], out_path: str | Path) -> None:
+def write_manifest(manifest: dict[str, Any], out_path: str | Path) -> None:
     Path(out_path).write_text(json.dumps(manifest, indent=2, sort_keys=True))

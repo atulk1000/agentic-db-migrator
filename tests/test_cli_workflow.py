@@ -7,11 +7,17 @@ from typer.testing import CliRunner
 
 import amo.cli as cli
 
-
 RUNNER = CliRunner()
 
 
-def _table(schema: str, table: str, estimated_rows: int, columns: list[dict], *, primary_key: list[str] | None = None) -> dict:
+def _table(
+    schema: str,
+    table: str,
+    estimated_rows: int,
+    columns: list[dict],
+    *,
+    primary_key: list[str] | None = None,
+) -> dict:
     return {
         "schema": schema,
         "table": table,
@@ -50,11 +56,35 @@ def _plan() -> dict:
         "steps": [
             {"id": "step_0001", "op": "ensure_schema", "schema": "public"},
             {"id": "step_0002", "op": "ensure_table", "schema": "public", "table": "users"},
-            {"id": "step_0003", "op": "copy_table", "schema": "public", "table": "users", "validate": {"rowcount": True}},
-            {"id": "step_0004", "op": "verify_table", "schema": "public", "table": "users", "validate": {"rowcount": True}},
+            {
+                "id": "step_0003",
+                "op": "copy_table",
+                "schema": "public",
+                "table": "users",
+                "validate": {"rowcount": True},
+            },
+            {
+                "id": "step_0004",
+                "op": "verify_table",
+                "schema": "public",
+                "table": "users",
+                "validate": {"rowcount": True},
+            },
             {"id": "step_0005", "op": "ensure_table", "schema": "public", "table": "orders"},
-            {"id": "step_0006", "op": "copy_table", "schema": "public", "table": "orders", "validate": {"rowcount": True}},
-            {"id": "step_0007", "op": "verify_table", "schema": "public", "table": "orders", "validate": {"rowcount": True}},
+            {
+                "id": "step_0006",
+                "op": "copy_table",
+                "schema": "public",
+                "table": "orders",
+                "validate": {"rowcount": True},
+            },
+            {
+                "id": "step_0007",
+                "op": "verify_table",
+                "schema": "public",
+                "table": "orders",
+                "validate": {"rowcount": True},
+            },
         ],
     }
 
@@ -107,7 +137,10 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "_generate_plan", lambda **_kwargs: _plan())
 
     out_dir = tmp_path / "analysis"
-    result = RUNNER.invoke(cli.app, ["analyze", "--config", "config.yaml", "--planner", "openai", "--out-dir", str(out_dir)])
+    result = RUNNER.invoke(
+        cli.app,
+        ["analyze", "--config", "config.yaml", "--planner", "openai", "--out-dir", str(out_dir)],
+    )
     assert result.exit_code == 0, result.output
 
     summary_path = out_dir / "pre_migration_summary.json"
@@ -179,7 +212,9 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
     )
     assert run_result.exit_code == 0, run_result.output
     assert captured["plan_obj"] is not None
-    filtered_tables = {step.get("table") for step in captured["plan_obj"]["steps"] if step.get("table")}
+    filtered_tables = {
+        step.get("table") for step in captured["plan_obj"]["steps"] if step.get("table")
+    }
     assert filtered_tables == {"users"}
 
     report_path = out_dir / "report.json"

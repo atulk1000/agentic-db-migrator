@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import psycopg2
 
 
-def dsn_from_cfg(db_cfg: Dict[str, Any]) -> str:
+def dsn_from_cfg(db_cfg: dict[str, Any]) -> str:
     return (
         f"host={db_cfg['host']} port={db_cfg.get('port', 5432)} dbname={db_cfg['database']} "
         f"user={db_cfg['user']} password={db_cfg['password']}"
     )
 
 
-def list_base_tables(conn, schema: str) -> List[str]:
+def list_base_tables(conn, schema: str) -> list[str]:
     """
     Returns base tables only (not views/matviews).
     """
@@ -31,7 +30,7 @@ def list_base_tables(conn, schema: str) -> List[str]:
         return [r[0] for r in cur.fetchall()]
 
 
-def get_columns(conn, schema: str, table: str) -> List[Dict[str, str]]:
+def get_columns(conn, schema: str, table: str) -> list[dict[str, str]]:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -48,7 +47,7 @@ def get_columns(conn, schema: str, table: str) -> List[Dict[str, str]]:
         return cols
 
 
-def estimate_rows(conn, schema: str, table: str) -> Optional[int]:
+def estimate_rows(conn, schema: str, table: str) -> int | None:
     """
     Uses pg_stat_all_tables.n_live_tup when available.
     """
@@ -73,7 +72,7 @@ def count_rows(conn, schema: str, table: str) -> int:
         return int(cur.fetchone()[0])
 
 
-def discover_schema(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def discover_schema(cfg: dict[str, Any]) -> dict[str, Any]:
     """
     Builds a manifest-like object for a schema from the SOURCE db.
     """
@@ -87,8 +86,8 @@ def discover_schema(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     dsn = dsn_from_cfg(source)
 
-    out_tables: List[Dict[str, Any]] = []
-    errors: List[str] = []
+    out_tables: list[dict[str, Any]] = []
+    errors: list[str] = []
 
     with psycopg2.connect(dsn) as conn:
         conn.autocommit = True

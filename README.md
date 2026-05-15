@@ -1,5 +1,7 @@
 # Agentic DB Migration Orchestrator
 
+[![CI](https://github.com/atulk1000/agentic-db-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/atulk1000/agentic-db-migrator/actions/workflows/ci.yml)
+
 An approval-gated database migration orchestrator for PostgreSQL with a CLI workflow, a browser dashboard, deterministic execution, and optional LLM planning adapters.
 
 This repo is built around one core idea:
