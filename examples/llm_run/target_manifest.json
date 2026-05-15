@@ -1,0 +1,17 @@
+{
+  "database_role": "target",
+  "errors": [],
+  "generated_at": "2026-05-15T00:00:00+00:00",
+  "include_schemas": [],
+  "matview_indexes": [],
+  "matviews": [],
+  "schema_grants": {},
+  "source": {
+    "database": "targetdb",
+    "host": "target-db",
+    "port": 5432
+  },
+  "tables": [],
+  "udfs": [],
+  "version": "v2"
+}

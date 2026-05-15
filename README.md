@@ -9,7 +9,7 @@ This repo is built around one core idea:
 - the planner recommends
 - the executor enforces
 
-That separation matters. It means you can experiment with heuristic, hosted-demo, Gemini, or future OpenAI/Ollama planners without giving a model direct authority over mutation, DDL, or cutover behavior.
+That separation matters. It means you can experiment with heuristic, hosted-demo, Gemini, or OpenAI planners without giving a model direct authority over mutation, DDL, or cutover behavior.
 
 ```mermaid
 flowchart LR
@@ -55,6 +55,16 @@ The [`examples/approval_workflow`](examples/approval_workflow) folder contains c
 - `post_migration_summary.md`
 
 These files demonstrate the audit trail the project is designed to produce: what was discovered, what changed, what was approved, what ran, and what verified cleanly.
+
+The [`examples/llm_run`](examples/llm_run) folder shows the AI-facing artifact chain:
+
+- `llm_raw_response.json`
+- `repaired_plan.json`
+- `validated_plan.json`
+- `approval.json`
+- `post_migration_summary.md`
+
+That example is meant to answer a practical reviewer question: what did the model contribute, and how did deterministic validation constrain it?
 
 ## What The Repo Supports Today
 
@@ -127,22 +137,49 @@ The CLI and browser UI accept:
 - `demo`
 - `gemini`
 - `openai`
-- `ollama`
 
 Current behavior:
 
 - `heuristic` is real and deterministic
 - `demo` can call a hosted planner endpoint you control and otherwise falls back safely
-- `gemini` can call Gemini directly when `GEMINI_API_KEY` is configured and otherwise falls back safely
-- `openai` is currently a demo adapter and falls back to heuristic
-- `ollama` currently falls back to heuristic
+- `gemini` is a real live planner path when `GEMINI_API_KEY` is configured; it receives the source manifest, manifest diff, and migration objective
+- `openai` is a real live planner path when `OPENAI_API_KEY` is configured; it uses the same prompt contract, drift context, validation, and fallback boundary as Gemini
 
 All LLM-backed planner paths are expected to go through the same safety gate:
 
 - provider-specific API call
-- shared normalization/repair of common model mistakes
+- shared prompt contract and normalization/repair of common model mistakes
 - strict plan validation
 - heuristic fallback if the output is still invalid
+
+## AI Planning Evidence
+
+The AI layer is deliberately structured and inspectable:
+
+- the active Gemini/OpenAI prompt is versioned in [`src/amo/core/planners/prompts/migration_planner_v1.md`](src/amo/core/planners/prompts/migration_planner_v1.md)
+- Gemini and OpenAI planning receive both source metadata and drift context during `analyze`
+- model output is normalized through [`llm_common.py`](src/amo/core/planners/llm_common.py)
+- every accepted plan is validated against strict Pydantic schemas before execution
+- invalid or unavailable model output falls back to the deterministic heuristic planner
+
+Run planner evals with:
+
+```powershell
+python evals/run_planner_eval.py --planner heuristic
+python evals/run_planner_eval.py --planner gemini
+python evals/run_planner_eval.py --planner openai
+```
+
+The eval report tracks:
+
+- schema-validation pass rate
+- fallback count
+- forbidden operation usage
+- required table coverage
+- required verification behavior
+- partition-fidelity behavior
+
+Saved eval cases live in [`evals/cases`](evals/cases), and the latest checked-in example report is [`evals/latest_eval_report.json`](evals/latest_eval_report.json).
 
 ## Safety Boundary
 
@@ -285,14 +322,24 @@ Copy-Item config.example.yaml config.yaml
 Copy-Item .env.example .env
 ```
 
-### Hosted Gemini Demo Path
+### Hosted LLM Planner Paths
 
-If you want to use the direct Gemini planner locally:
+If you want to use Gemini locally:
 
 ```powershell
 $env:GEMINI_API_KEY="your-key-here"
 python -m amo.cli analyze --config config.yaml --planner gemini --out-dir runs\analysis_gemini
 ```
+
+If you want to use OpenAI locally:
+
+```powershell
+$env:OPENAI_API_KEY="your-key-here"
+$env:OPENAI_MODEL="gpt-4.1-mini"
+python -m amo.cli analyze --config config.yaml --planner openai --out-dir runs\analysis_openai
+```
+
+Provider API keys should stay local in `.env` or your shell environment. Do not commit real API keys.
 
 ## Low-Level Commands
 
@@ -365,8 +412,10 @@ src/amo/
       llm_common.py
       llm_stub.py
       models.py
-      ollama.py
       openai.py
+      prompting.py
+      prompts/
+        migration_planner_v1.md
       remote_demo.py
   engines/
     base.py
@@ -382,10 +431,17 @@ tests/
   test_cli_workflow.py
   test_gemini_planner.py
   test_heuristic_planner.py
+  test_openai_planner.py
   test_remote_demo_planner.py
   test_verifier.py
 archive/
   v1/
+evals/
+  cases/
+  run_planner_eval.py
+examples/
+  approval_workflow/
+  llm_run/
 ```
 
 Notes:
@@ -403,14 +459,15 @@ What is strong today:
 - deterministic executor boundary
 - partition-aware planning/execution
 - structured artifacts and summaries
+- live Gemini planner path when configured with `GEMINI_API_KEY`
+- live OpenAI planner path when configured with `OPENAI_API_KEY`
+- planner eval scaffolding and checked-in LLM artifacts
 
 What is still evolving:
 
-- `openai` is not yet a true live structured planner
-- `ollama` is still fallback-oriented
 - `spark_jdbc` support is scaffolded but not yet battle-hardened
 - Streamlit is a lightweight workflow dashboard, not a polished product UI
-- some Docker/app runtime paths are demo-oriented rather than fully productionized
+- the eval suite is intentionally small and should grow with more migration edge cases
 
 ## Testing
 
@@ -419,6 +476,8 @@ Run the local checks with:
 ```powershell
 python -m compileall src tests
 python -m pytest -q
+python evals/run_planner_eval.py --planner heuristic
+python evals/run_planner_eval.py --planner openai
 ```
 
 Format and lint before publishing:
@@ -433,7 +492,6 @@ The repo also includes `.gitattributes` and formatter settings in `pyproject.tom
 
 ## Roadmap
 
-- replace the `openai` fallback with a true structured OpenAI planner
 - harden the hosted demo planner with retries, repair, and better telemetry
 - deepen `spark_jdbc` execution behavior for chunked and partition-wise transfer
 - improve PostGIS conversion handling for non-native transfer paths

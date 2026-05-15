@@ -1,0 +1,108 @@
+{
+  "description": "A partitioned table should preserve partition-aware copy and verification behavior.",
+  "manifest": {
+    "database_role": "source",
+    "errors": [],
+    "generated_at": "2026-05-15T00:00:00+00:00",
+    "include_schemas": [
+      "analytics"
+    ],
+    "matview_indexes": [],
+    "matviews": [],
+    "schema_grants": {},
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "tables": [
+      {
+        "columns": [
+          {
+            "attidentity": "d",
+            "default_sql": null,
+            "name": "event_id",
+            "nextval_sequences": [],
+            "not_null": true,
+            "type_sql": "integer",
+            "udt_name": "int4"
+          },
+          {
+            "attidentity": "",
+            "default_sql": null,
+            "name": "event_ts",
+            "nextval_sequences": [],
+            "not_null": true,
+            "type_sql": "timestamp without time zone",
+            "udt_name": "timestamp"
+          }
+        ],
+        "estimated_bytes": 5000000,
+        "estimated_rows": 50000,
+        "foreign_keys": [],
+        "geometry_columns": [],
+        "grants": [],
+        "has_geometry": false,
+        "indexes": [],
+        "partition": {
+          "children": [
+            {
+              "bound": "FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')",
+              "schema": "analytics",
+              "table": "events_p_2026_01"
+            },
+            {
+              "bound": "FOR VALUES FROM ('2026-02-01') TO ('2026-03-01')",
+              "schema": "analytics",
+              "table": "events_p_2026_02"
+            }
+          ],
+          "is_partition_parent": true,
+          "partition_key": "RANGE (event_ts)"
+        },
+        "primary_key": [
+          "event_id",
+          "event_ts"
+        ],
+        "schema": "analytics",
+        "table": "events_p"
+      }
+    ],
+    "udfs": [],
+    "version": "v2"
+  },
+  "manifest_diff": {
+    "source_role": "source",
+    "summary": {
+      "metadata_diff": 0,
+      "metadata_match": 0,
+      "missing_in_source": 0,
+      "missing_in_target": 1,
+      "source_tables": 1,
+      "target_tables": 0
+    },
+    "tables": [
+      {
+        "schema": "analytics",
+        "status": "missing_in_target",
+        "structure_compatible": true,
+        "table": "events_p"
+      }
+    ],
+    "target_role": "target",
+    "warnings": []
+  },
+  "expected": {
+    "must_include_tables": [
+      "analytics.events_p_2026_01",
+      "analytics.events_p_2026_02"
+    ],
+    "must_not_use_ops": [
+      "drop_table",
+      "execute_sql"
+    ],
+    "requires_partition_fidelity_for": [
+      "analytics.events_p"
+    ]
+  }
+}

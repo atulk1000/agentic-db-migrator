@@ -1,0 +1,25 @@
+{
+  "source_role": "source",
+  "summary": {
+    "metadata_diff": 0,
+    "metadata_match": 0,
+    "missing_in_source": 0,
+    "missing_in_target": 1,
+    "source_tables": 1,
+    "target_tables": 0
+  },
+  "tables": [
+    {
+      "schema": "analytics",
+      "source_estimated_rows": 1200000,
+      "source_present": true,
+      "status": "missing_in_target",
+      "structural_drift": [],
+      "structure_compatible": true,
+      "table": "events",
+      "target_present": false
+    }
+  ],
+  "target_role": "target",
+  "warnings": []
+}

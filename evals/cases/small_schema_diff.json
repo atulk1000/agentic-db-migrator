@@ -1,0 +1,132 @@
+{
+  "description": "A small source schema has one table missing in target and one table already matching.",
+  "manifest": {
+    "database_role": "source",
+    "errors": [],
+    "generated_at": "2026-05-15T00:00:00+00:00",
+    "include_schemas": [
+      "analytics",
+      "demo"
+    ],
+    "matview_indexes": [],
+    "matviews": [],
+    "schema_grants": {},
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "tables": [
+      {
+        "columns": [
+          {
+            "attidentity": "d",
+            "default_sql": null,
+            "name": "event_id",
+            "nextval_sequences": [],
+            "not_null": true,
+            "type_sql": "integer",
+            "udt_name": "int4"
+          },
+          {
+            "attidentity": "",
+            "default_sql": null,
+            "name": "event_ts",
+            "nextval_sequences": [],
+            "not_null": true,
+            "type_sql": "timestamp without time zone",
+            "udt_name": "timestamp"
+          }
+        ],
+        "estimated_bytes": 2500000,
+        "estimated_rows": 20000,
+        "foreign_keys": [],
+        "geometry_columns": [],
+        "grants": [],
+        "has_geometry": false,
+        "indexes": [],
+        "partition": {
+          "children": [],
+          "is_partition_parent": false,
+          "partition_key": null
+        },
+        "primary_key": [
+          "event_id"
+        ],
+        "schema": "analytics",
+        "table": "events"
+      },
+      {
+        "columns": [
+          {
+            "attidentity": "d",
+            "default_sql": null,
+            "name": "user_id",
+            "nextval_sequences": [],
+            "not_null": true,
+            "type_sql": "integer",
+            "udt_name": "int4"
+          }
+        ],
+        "estimated_bytes": 80000,
+        "estimated_rows": 1000,
+        "foreign_keys": [],
+        "geometry_columns": [],
+        "grants": [],
+        "has_geometry": false,
+        "indexes": [],
+        "partition": {
+          "children": [],
+          "is_partition_parent": false,
+          "partition_key": null
+        },
+        "primary_key": [
+          "user_id"
+        ],
+        "schema": "demo",
+        "table": "users"
+      }
+    ],
+    "udfs": [],
+    "version": "v2"
+  },
+  "manifest_diff": {
+    "source_role": "source",
+    "summary": {
+      "metadata_diff": 0,
+      "metadata_match": 1,
+      "missing_in_source": 0,
+      "missing_in_target": 1,
+      "source_tables": 2,
+      "target_tables": 1
+    },
+    "tables": [
+      {
+        "schema": "analytics",
+        "status": "missing_in_target",
+        "structure_compatible": true,
+        "table": "events"
+      },
+      {
+        "schema": "demo",
+        "status": "metadata_match",
+        "structure_compatible": true,
+        "table": "users"
+      }
+    ],
+    "target_role": "target",
+    "warnings": []
+  },
+  "expected": {
+    "must_include_tables": [
+      "analytics.events"
+    ],
+    "must_not_use_ops": [
+      "drop_table",
+      "execute_sql"
+    ],
+    "requires_sample_hash_for": [
+      "analytics.events"
+    ]
+  }
+}

@@ -43,7 +43,7 @@ exclude_tables:
 exclude_suffixes: []     # optional; project-specific
 
 planning:
-  planner: heuristic        # heuristic | demo | gemini | openai | ollama
+  planner: heuristic        # heuristic | demo | gemini | openai
   max_partitions: 16
   default_batch_size: 20000
 
