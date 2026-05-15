@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import psycopg2
 
 
-def _dsn_from_cfg(db_cfg: Dict[str, Any]) -> str:
+def _dsn_from_cfg(db_cfg: dict[str, Any]) -> str:
     """
     Build a psycopg2 DSN from config dict keys:
     host, port, database, user, password
@@ -23,7 +22,7 @@ def _dsn_from_cfg(db_cfg: Dict[str, Any]) -> str:
     )
 
 
-def _fetchall(cur, query: str, params: Tuple[Any, ...] = ()) -> List[tuple]:
+def _fetchall(cur, query: str, params: tuple[Any, ...] = ()) -> list[tuple]:
     cur.execute(query, params)
     return cur.fetchall()
 
@@ -40,7 +39,7 @@ def _table_exists(cur, schema: str, table: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _get_tables_in_schema(cur, schema: str) -> List[str]:
+def _get_tables_in_schema(cur, schema: str) -> list[str]:
     rows = _fetchall(
         cur,
         """
@@ -55,7 +54,7 @@ def _get_tables_in_schema(cur, schema: str) -> List[str]:
     return [r[0] for r in rows]
 
 
-def _get_columns(cur, schema: str, table: str) -> List[Dict[str, str]]:
+def _get_columns(cur, schema: str, table: str) -> list[dict[str, str]]:
     rows = _fetchall(
         cur,
         """
@@ -81,7 +80,7 @@ def _get_columns(cur, schema: str, table: str) -> List[Dict[str, str]]:
     ]
 
 
-def _get_primary_key_columns(cur, schema: str, table: str) -> List[str]:
+def _get_primary_key_columns(cur, schema: str, table: str) -> list[str]:
     rows = _fetchall(
         cur,
         """
@@ -101,7 +100,7 @@ def _get_primary_key_columns(cur, schema: str, table: str) -> List[str]:
     return [r[0] for r in rows]
 
 
-def _estimate_rows_pg_stats(cur, schema: str, table: str) -> Optional[int]:
+def _estimate_rows_pg_stats(cur, schema: str, table: str) -> int | None:
     """
     Fast estimate from pg_stat_all_tables.n_live_tup.
     Returns None if stats are missing.
@@ -121,27 +120,27 @@ def _estimate_rows_pg_stats(cur, schema: str, table: str) -> Optional[int]:
     return int(val) if val is not None else None
 
 
-def _has_geometry(columns: List[Dict[str, Any]]) -> bool:
+def _has_geometry(columns: list[dict[str, Any]]) -> bool:
     # PostGIS geometry columns appear as udt_name = 'geometry'
     return any(c.get("udt_name") == "geometry" for c in columns)
 
 
-def build_manifest(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def build_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     """
     Discover source DB metadata per config and return a manifest dict.
     """
     migration_cfg = cfg.get("migration", {})
-    include_schemas: List[str] = migration_cfg.get("include_schemas", [])
-    exclude_schemas: List[str] = migration_cfg.get("exclude_schemas", [])
+    include_schemas: list[str] = migration_cfg.get("include_schemas", [])
+    exclude_schemas: list[str] = migration_cfg.get("exclude_schemas", [])
 
-    exclude_tables: List[str] = migration_cfg.get("exclude_tables", [])
-    exclude_suffixes: List[str] = migration_cfg.get("exclude_suffixes", [])
+    exclude_tables: list[str] = migration_cfg.get("exclude_tables", [])
+    exclude_suffixes: list[str] = migration_cfg.get("exclude_suffixes", [])
 
     src_cfg = cfg["source"]
     dsn = _dsn_from_cfg(src_cfg)
 
-    discovered: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
+    discovered: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
 
     with psycopg2.connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -193,6 +192,6 @@ def build_manifest(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return manifest
 
 
-def write_manifest(manifest: Dict[str, Any], out_path: str | Path) -> None:
+def write_manifest(manifest: dict[str, Any], out_path: str | Path) -> None:
     p = Path(out_path)
     p.write_text(json.dumps(manifest, indent=2, sort_keys=True))

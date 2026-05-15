@@ -1,0 +1,39 @@
+{
+  "source_role": "source",
+  "summary": {
+    "metadata_diff": 0,
+    "metadata_match": 1,
+    "missing_in_source": 0,
+    "missing_in_target": 1,
+    "source_tables": 2,
+    "target_tables": 1
+  },
+  "tables": [
+    {
+      "auxiliary_drift": [],
+      "schema": "analytics",
+      "source_estimated_rows": 20000,
+      "source_present": true,
+      "status": "missing_in_target",
+      "structural_drift": [],
+      "structure_compatible": true,
+      "table": "events",
+      "target_estimated_rows": null,
+      "target_present": false
+    },
+    {
+      "auxiliary_drift": [],
+      "schema": "demo",
+      "source_estimated_rows": 1000,
+      "source_present": true,
+      "status": "metadata_match",
+      "structural_drift": [],
+      "structure_compatible": true,
+      "table": "users",
+      "target_estimated_rows": 1000,
+      "target_present": true
+    }
+  ],
+  "target_role": "target",
+  "warnings": []
+}

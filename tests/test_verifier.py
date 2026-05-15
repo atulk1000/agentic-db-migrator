@@ -62,7 +62,13 @@ def test_verify_plan_prefers_verify_steps_over_copy_steps(tmp_path, monkeypatch)
             {
                 "steps": [
                     {"id": "1", "op": "copy_table", "schema": "public", "table": "users"},
-                    {"id": "2", "op": "verify_table", "schema": "public", "table": "users", "validate": {}},
+                    {
+                        "id": "2",
+                        "op": "verify_table",
+                        "schema": "public",
+                        "table": "users",
+                        "validate": {},
+                    },
                 ]
             }
         )

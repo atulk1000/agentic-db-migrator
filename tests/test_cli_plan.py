@@ -6,7 +6,6 @@ from typer.testing import CliRunner
 
 from amo.cli import app
 
-
 RUNNER = CliRunner()
 
 
@@ -37,7 +36,11 @@ def _write_manifest(path) -> None:
                                 "nextval_sequences": ["public.users_id_seq"],
                             }
                         ],
-                        "partition": {"is_partition_parent": False, "partition_key": None, "children": []},
+                        "partition": {
+                            "is_partition_parent": False,
+                            "partition_key": None,
+                            "children": [],
+                        },
                         "foreign_keys": [],
                         "indexes": [],
                     }
@@ -55,11 +58,19 @@ def test_cli_plan_supports_all_advertised_planners(tmp_path):
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
 
-    for planner_name in ("heuristic", "demo", "gemini", "openai", "ollama"):
+    for planner_name in ("heuristic", "demo", "gemini", "openai"):
         out_path = tmp_path / f"{planner_name}.json"
         result = RUNNER.invoke(
             app,
-            ["plan", "--manifest", str(manifest_path), "--planner", planner_name, "--out", str(out_path)],
+            [
+                "plan",
+                "--manifest",
+                str(manifest_path),
+                "--planner",
+                planner_name,
+                "--out",
+                str(out_path),
+            ],
         )
         assert result.exit_code == 0, result.output
 

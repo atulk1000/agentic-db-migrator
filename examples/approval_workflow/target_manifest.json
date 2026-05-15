@@ -1,0 +1,59 @@
+{
+  "database_role": "target",
+  "errors": [],
+  "generated_at": "2026-05-04T00:00:00+00:00",
+  "include_schemas": [
+    "demo"
+  ],
+  "matview_indexes": [],
+  "matviews": [],
+  "schema_grants": {},
+  "source": {
+    "database": "targetdb",
+    "host": "target-db",
+    "port": 5432
+  },
+  "tables": [
+    {
+      "columns": [
+        {
+          "attidentity": "d",
+          "default_sql": null,
+          "name": "user_id",
+          "nextval_sequences": [],
+          "not_null": true,
+          "type_sql": "integer",
+          "udt_name": "int4"
+        },
+        {
+          "attidentity": "",
+          "default_sql": null,
+          "name": "created_at",
+          "nextval_sequences": [],
+          "not_null": true,
+          "type_sql": "timestamp without time zone",
+          "udt_name": "timestamp"
+        }
+      ],
+      "estimated_bytes": 81920,
+      "estimated_rows": 1000,
+      "foreign_keys": [],
+      "geometry_columns": [],
+      "grants": [],
+      "has_geometry": false,
+      "indexes": [],
+      "partition": {
+        "children": [],
+        "is_partition_parent": false,
+        "partition_key": null
+      },
+      "primary_key": [
+        "user_id"
+      ],
+      "schema": "demo",
+      "table": "users"
+    }
+  ],
+  "udfs": [],
+  "version": "v2"
+}

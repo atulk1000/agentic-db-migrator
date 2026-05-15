@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from io import StringIO
-from typing import Any, Dict, Optional
+from typing import Any
 
 import psycopg2
 
 
-def dsn_from_cfg(db_cfg: Dict[str, Any]) -> str:
+def dsn_from_cfg(db_cfg: dict[str, Any]) -> str:
     return (
         f"host={db_cfg['host']} port={db_cfg.get('port', 5432)} dbname={db_cfg['database']} "
         f"user={db_cfg['user']} password={db_cfg['password']}"
@@ -18,11 +18,11 @@ def _fq(schema: str, table: str) -> str:
 
 
 def copy_table_copy(
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
     schema: str,
     table: str,
     truncate_first: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Portable demo path:
       - target table must already exist (for demo seed, you’ll create it in source.sql for target too OR create during run)

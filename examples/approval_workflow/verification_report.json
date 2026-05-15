@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "results": [
+    {
+      "ok": true,
+      "sample_hash_ok": true,
+      "schema": "analytics",
+      "source_rows": 20000,
+      "table": "events",
+      "target_rows": 20000
+    }
+  ],
+  "tables_checked": 1
+}

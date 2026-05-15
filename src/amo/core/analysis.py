@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 from amo.core.manifest_builder import build_manifest
 from amo.core.planners.models import ManifestTable, MigrationManifest, validate_plan_document
@@ -26,20 +27,19 @@ from amo.core.workflow_models import (
     VerificationDepth,
 )
 
-
 CHUNKABLE_TYPE_MARKERS = ("int", "numeric", "date", "timestamp")
 TIMESTAMP_COLUMN_HINTS = ("created_at", "updated_at", "event_ts", "timestamp", "ts")
 
 
-def read_json(path: str | Path) -> Dict[str, Any]:
+def read_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
 
 
-def write_json(path: str | Path, obj: Dict[str, Any]) -> None:
+def write_json(path: str | Path, obj: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(obj, indent=2, sort_keys=True))
 
 
-def build_database_manifest(cfg: Dict[str, Any], db_key: str) -> Dict[str, Any]:
+def build_database_manifest(cfg: dict[str, Any], db_key: str) -> dict[str, Any]:
     return build_manifest(cfg, db_key=db_key)
 
 
@@ -63,7 +63,7 @@ def _table_key(schema: str, table: str) -> str:
     return f"{schema}.{table}"
 
 
-def _root_tables(manifest: MigrationManifest) -> List[ManifestTable]:
+def _root_tables(manifest: MigrationManifest) -> list[ManifestTable]:
     partition_children = {
         _table_key(child.schema_name, child.table)
         for table in manifest.tables
@@ -76,7 +76,9 @@ def _root_tables(manifest: MigrationManifest) -> List[ManifestTable]:
     ]
 
 
-def _column_signature(table: ManifestTable) -> List[Tuple[str, Optional[str], bool, str, Optional[str]]]:
+def _column_signature(
+    table: ManifestTable,
+) -> list[tuple[str, str | None, bool, str, str | None]]:
     return [
         (
             column.name,
@@ -89,27 +91,37 @@ def _column_signature(table: ManifestTable) -> List[Tuple[str, Optional[str], bo
     ]
 
 
-def _normalized_index_defs(table: ManifestTable) -> List[str]:
-    return sorted((index.index_definition or "").strip() for index in table.indexes if index.index_definition)
+def _normalized_index_defs(table: ManifestTable) -> list[str]:
+    return sorted(
+        (index.index_definition or "").strip() for index in table.indexes if index.index_definition
+    )
 
 
-def _normalized_fk_defs(table: ManifestTable) -> List[str]:
+def _normalized_fk_defs(table: ManifestTable) -> list[str]:
     return sorted((fk.definition or "").strip() for fk in table.foreign_keys if fk.definition)
 
 
-def _partition_signature(table: ManifestTable) -> Tuple[bool, Optional[str], Tuple[str, ...]]:
-    children = tuple(sorted(_table_key(child.schema_name, child.table) for child in table.partition.children))
+def _partition_signature(table: ManifestTable) -> tuple[bool, str | None, tuple[str, ...]]:
+    children = tuple(
+        sorted(_table_key(child.schema_name, child.table) for child in table.partition.children)
+    )
     return (table.partition.is_partition_parent, table.partition.partition_key, children)
 
 
-def diff_manifests(source_manifest: Dict[str, Any], target_manifest: Dict[str, Any]) -> Dict[str, Any]:
+def diff_manifests(
+    source_manifest: dict[str, Any], target_manifest: dict[str, Any]
+) -> dict[str, Any]:
     source = MigrationManifest.model_validate(source_manifest)
     target = MigrationManifest.model_validate(target_manifest)
 
-    source_tables = {_table_key(table.schema_name, table.table): table for table in _root_tables(source)}
-    target_tables = {_table_key(table.schema_name, table.table): table for table in _root_tables(target)}
+    source_tables = {
+        _table_key(table.schema_name, table.table): table for table in _root_tables(source)
+    }
+    target_tables = {
+        _table_key(table.schema_name, table.table): table for table in _root_tables(target)
+    }
 
-    entries: List[TableDiffEntry] = []
+    entries: list[TableDiffEntry] = []
 
     for key in sorted(source_tables):
         source_table = source_tables[key]
@@ -128,8 +140,8 @@ def diff_manifests(source_manifest: Dict[str, Any], target_manifest: Dict[str, A
             )
             continue
 
-        structural_drift: List[str] = []
-        auxiliary_drift: List[str] = []
+        structural_drift: list[str] = []
+        auxiliary_drift: list[str] = []
 
         if _column_signature(source_table) != _column_signature(target_table):
             structural_drift.append("columns")
@@ -191,10 +203,12 @@ def diff_manifests(source_manifest: Dict[str, Any], target_manifest: Dict[str, A
     if target_only:
         warnings.append(f"Target contains {len(target_only)} table(s) not present in source.")
 
-    return ManifestDiffDocument(summary=summary, tables=entries, warnings=warnings).model_dump(mode="python", by_alias=True)
+    return ManifestDiffDocument(summary=summary, tables=entries, warnings=warnings).model_dump(
+        mode="python", by_alias=True
+    )
 
 
-def _extract_partition_chunk_column(table: ManifestTable) -> Optional[str]:
+def _extract_partition_chunk_column(table: ManifestTable) -> str | None:
     partition_key = table.partition.partition_key or ""
     match = re.search(r"\(([^)]+)\)", partition_key)
     if not match:
@@ -203,15 +217,19 @@ def _extract_partition_chunk_column(table: ManifestTable) -> Optional[str]:
     return raw.strip('"')
 
 
-def _is_chunkable_type(type_sql: Optional[str]) -> bool:
+def _is_chunkable_type(type_sql: str | None) -> bool:
     lowered = (type_sql or "").lower()
     return any(marker in lowered for marker in CHUNKABLE_TYPE_MARKERS)
 
 
-def _choose_chunk_column(table: ManifestTable) -> Optional[str]:
+def _choose_chunk_column(table: ManifestTable) -> str | None:
     partition_column = _extract_partition_chunk_column(table)
     columns = {column.name: column for column in table.columns}
-    if partition_column and partition_column in columns and _is_chunkable_type(columns[partition_column].type_sql):
+    if (
+        partition_column
+        and partition_column in columns
+        and _is_chunkable_type(columns[partition_column].type_sql)
+    ):
         return partition_column
 
     for name in TIMESTAMP_COLUMN_HINTS:
@@ -231,7 +249,7 @@ def _choose_chunk_column(table: ManifestTable) -> Optional[str]:
     return None
 
 
-def _determine_chunk_count(table: ManifestTable, chunk_column: Optional[str]) -> int:
+def _determine_chunk_count(table: ManifestTable, chunk_column: str | None) -> int:
     estimated_rows = table.estimated_rows or 0
     if not chunk_column or estimated_rows <= 250_000:
         return 1
@@ -254,9 +272,11 @@ def _risk_level(score: int) -> RiskLevel:
     return "low"
 
 
-def _score_risk(table: ManifestTable, diff_entry: TableDiffEntry, chunk_column: Optional[str]) -> Tuple[int, List[str]]:
+def _score_risk(
+    table: ManifestTable, diff_entry: TableDiffEntry, chunk_column: str | None
+) -> tuple[int, list[str]]:
     score = 0
-    reasons: List[str] = []
+    reasons: list[str] = []
 
     estimated_rows = table.estimated_rows or 0
     if estimated_rows >= 1_000_000:
@@ -322,15 +342,25 @@ def _recommend_action(mode: MigrationMode, diff_entry: TableDiffEntry) -> TableA
         return "manual_review"
 
     if mode == "data_diff_only":
-        return "copy" if diff_entry.structure_compatible or diff_entry.status == "missing_in_target" else "manual_review"
+        return (
+            "copy"
+            if diff_entry.structure_compatible or diff_entry.status == "missing_in_target"
+            else "manual_review"
+        )
 
     if mode in ("full_refresh", "safe_sync"):
-        return "copy" if diff_entry.structure_compatible or diff_entry.status == "missing_in_target" else "manual_review"
+        return (
+            "copy"
+            if diff_entry.structure_compatible or diff_entry.status == "missing_in_target"
+            else "manual_review"
+        )
 
     return "manual_review"
 
 
-def _build_recommendation(table: ManifestTable, diff_entry: TableDiffEntry, mode: MigrationMode) -> TableRecommendation:
+def _build_recommendation(
+    table: ManifestTable, diff_entry: TableDiffEntry, mode: MigrationMode
+) -> TableRecommendation:
     chunk_column = _choose_chunk_column(table)
     chunk_count = _determine_chunk_count(table, chunk_column)
     transfer_strategy = _determine_transfer_strategy(table, chunk_count)
@@ -375,18 +405,20 @@ def _build_recommendation(table: ManifestTable, diff_entry: TableDiffEntry, mode
 
 
 def build_pre_migration_summary(
-    source_manifest: Dict[str, Any],
-    target_manifest: Dict[str, Any],
-    manifest_diff: Dict[str, Any],
-    plan: Dict[str, Any],
+    source_manifest: dict[str, Any],
+    target_manifest: dict[str, Any],
+    manifest_diff: dict[str, Any],
+    plan: dict[str, Any],
     migration_mode: MigrationMode = "safe_sync",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     source = MigrationManifest.model_validate(source_manifest)
     diff = ManifestDiffDocument.model_validate(manifest_diff)
 
     diff_map = {_table_key(item.schema_name, item.table): item for item in diff.tables}
     recommendations = [
-        _build_recommendation(table, diff_map[_table_key(table.schema_name, table.table)], migration_mode)
+        _build_recommendation(
+            table, diff_map[_table_key(table.schema_name, table.table)], migration_mode
+        )
         for table in _root_tables(source)
         if _table_key(table.schema_name, table.table) in diff_map
     ]
@@ -413,13 +445,17 @@ def build_pre_migration_summary(
         source_tables=diff.summary.source_tables,
         target_tables=diff.summary.target_tables,
         tables_to_copy=sum(1 for item in recommendations if item.action == "copy"),
-        tables_to_sync_metadata=sum(1 for item in recommendations if item.action == "sync_metadata"),
+        tables_to_sync_metadata=sum(
+            1 for item in recommendations if item.action == "sync_metadata"
+        ),
         manual_review_count=len(manual_review_required),
         skipped_tables=sum(1 for item in recommendations if item.action == "skip"),
     )
 
     planner_recommendation = (
-        "Review manual-review items before execution." if manual_review_required else "Plan can proceed after user approval."
+        "Review manual-review items before execution."
+        if manual_review_required
+        else "Plan can proceed after user approval."
     )
 
     return PreMigrationSummary(
@@ -433,10 +469,10 @@ def build_pre_migration_summary(
     ).model_dump(mode="python", by_alias=True)
 
 
-def render_pre_migration_summary(summary: Dict[str, Any]) -> str:
+def render_pre_migration_summary(summary: dict[str, Any]) -> str:
     doc = PreMigrationSummary.model_validate(summary)
     lines = [
-        f"Pre-Migration Summary",
+        "Pre-Migration Summary",
         f"Mode: {doc.overview.mode}",
         f"Planner: {doc.overview.planner}",
         f"Source tables: {doc.overview.source_tables}",
@@ -471,11 +507,11 @@ def build_approval_document(
     approved_mode: MigrationMode,
     approved_by: str = "manual",
     allow_destructive: bool = False,
-    include_tables: Optional[Iterable[str]] = None,
-    exclude_tables: Optional[Iterable[str]] = None,
-    approved_manual_review_items: Optional[Iterable[str]] = None,
-    notes: Optional[str] = None,
-) -> Dict[str, Any]:
+    include_tables: Iterable[str] | None = None,
+    exclude_tables: Iterable[str] | None = None,
+    approved_manual_review_items: Iterable[str] | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
     summary = load_pre_summary(summary_path)
 
     default_included = [
@@ -503,23 +539,22 @@ def build_approval_document(
 
 
 def filter_plan_for_approval(
-    plan: Dict[str, Any],
-    summary: Dict[str, Any],
-    approval: Dict[str, Any],
-) -> Dict[str, Any]:
+    plan: dict[str, Any],
+    summary: dict[str, Any],
+    approval: dict[str, Any],
+) -> dict[str, Any]:
     plan_obj = validate_plan_document(plan)
     summary_doc = PreMigrationSummary.model_validate(summary)
     approval_doc = ApprovalDocument.model_validate(approval)
 
     recommendation_map = {
-        _table_key(item.schema_name, item.table): item
-        for item in summary_doc.table_recommendations
+        _table_key(item.schema_name, item.table): item for item in summary_doc.table_recommendations
     }
     included_tables = set(approval_doc.included_tables)
     excluded_tables = set(approval_doc.excluded_tables)
     approved_manual = set(approval_doc.approved_manual_review_items)
 
-    approved_actions: Dict[str, str] = {}
+    approved_actions: dict[str, str] = {}
     for key, recommendation in recommendation_map.items():
         if key in excluded_tables:
             continue
@@ -534,13 +569,39 @@ def filter_plan_for_approval(
         approved_actions[key] = recommendation.action
 
     approved_schemas = {key.split(".", 1)[0] for key in approved_actions}
-    filtered_steps: List[Dict[str, Any]] = []
+    filtered_steps: list[dict[str, Any]] = []
+    partition_parent_keys = {
+        _table_key(step.get("schema"), step.get("table"))
+        for step in plan_obj.get("steps", [])
+        if step.get("op") == "verify_table"
+        and bool((step.get("validate") or {}).get("partition_fidelity", False))
+        and step.get("schema")
+        and step.get("table")
+    }
+    active_partition_parent: str | None = None
 
     for step in plan_obj.get("steps", []):
         op = step.get("op")
         schema = step.get("schema")
         table = step.get("table")
         table_key = _table_key(schema, table) if schema and table else None
+
+        if active_partition_parent:
+            if op in ("ensure_table", "copy_table") and table_key not in approved_actions:
+                filtered_steps.append(step)
+                continue
+            if table_key == active_partition_parent and op in (
+                "sync_sequences",
+                "create_indexes",
+                "verify_table",
+                "analyze_table",
+                "vacuum_analyze_table",
+            ):
+                filtered_steps.append(step)
+                if op in ("analyze_table", "vacuum_analyze_table", "verify_table"):
+                    active_partition_parent = None
+                continue
+            active_partition_parent = None
 
         if op == "ensure_schema":
             if schema in approved_schemas:
@@ -554,7 +615,8 @@ def filter_plan_for_approval(
 
         if op == "add_fks":
             fks = [
-                fk for fk in step.get("fks", [])
+                fk
+                for fk in step.get("fks", [])
                 if _table_key(fk.get("schema", schema), fk.get("table", "")) in approved_actions
             ]
             if fks:
@@ -572,6 +634,8 @@ def filter_plan_for_approval(
             continue
 
         action = approved_actions[table_key]
+        if op == "ensure_table" and table_key in partition_parent_keys:
+            active_partition_parent = table_key
         if action == "sync_metadata" and op not in ("ensure_table", "create_indexes"):
             continue
 
@@ -587,14 +651,16 @@ def filter_plan_for_approval(
 
 
 def build_post_migration_summary(
-    plan: Dict[str, Any],
-    state: Dict[str, Any],
-    report: Optional[Dict[str, Any]] = None,
-    pre_summary: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    report: dict[str, Any] | None = None,
+    pre_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     steps = plan.get("steps", [])
     completed = state.get("completed", {})
-    failed_steps = [step_id for step_id, payload in completed.items() if not payload.get("ok", False)]
+    failed_steps = [
+        step_id for step_id, payload in completed.items() if not payload.get("ok", False)
+    ]
     execution = PostMigrationExecutionOverview(
         total_steps=len(steps),
         completed_steps=len(completed),
@@ -614,13 +680,13 @@ def build_post_migration_summary(
         failed_tables=failed_tables,
     )
 
-    residual_manual_review: List[str] = []
+    residual_manual_review: list[str] = []
     if pre_summary:
         residual_manual_review = list(
             PreMigrationSummary.model_validate(pre_summary).manual_review_required
         )
 
-    next_actions: List[str] = []
+    next_actions: list[str] = []
     if failed_steps:
         next_actions.append("Review failed steps in the state file before retrying.")
     if failed_tables:
@@ -628,7 +694,9 @@ def build_post_migration_summary(
     if residual_manual_review:
         next_actions.append("Resolve outstanding manual-review items.")
     if not next_actions:
-        next_actions.append("Migration completed cleanly. Review the post-migration report and proceed to cutover.")
+        next_actions.append(
+            "Migration completed cleanly. Review the post-migration report and proceed to cutover."
+        )
 
     return PostMigrationSummary(
         execution_overview=execution,
@@ -640,7 +708,7 @@ def build_post_migration_summary(
     ).model_dump(mode="python", by_alias=True)
 
 
-def render_post_migration_summary(summary: Dict[str, Any]) -> str:
+def render_post_migration_summary(summary: dict[str, Any]) -> str:
     doc = PostMigrationSummary.model_validate(summary)
     lines = [
         "Post-Migration Summary",

@@ -6,12 +6,11 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import psycopg2
-from psycopg2 import pool, sql
 from psycopg2 import extensions as ext
-
+from psycopg2 import pool, sql
 
 ARCHIVED_SUFFIX = "_archive"
 TABLE_SUFFIX = "_table"
@@ -27,7 +26,7 @@ DEFAULT_SYSTEM_TABLES = {
 _NEXTVAL_RE = re.compile(r"nextval\('([^']+)'\s*(?:::regclass)?\)", re.IGNORECASE)
 
 
-def _dsn(db_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _dsn(db_cfg: dict[str, Any]) -> dict[str, Any]:
     return dict(
         host=db_cfg["host"],
         port=db_cfg.get("port", 5432),
@@ -45,11 +44,11 @@ def _fq(schema: str, name: str) -> sql.SQL:
     return sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(name))
 
 
-def _read_json(path: str | Path) -> Dict[str, Any]:
+def _read_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
 
 
-def _write_json(path: str | Path, obj: Dict[str, Any]) -> None:
+def _write_json(path: str | Path, obj: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(obj, indent=2, sort_keys=True))
 
 
@@ -67,15 +66,15 @@ def _ensure_idle(conn) -> None:
 
 @dataclass
 class MigrationPolicy:
-    include_schemas: List[str]
-    exclude_schemas: List[str]
-    exclude_tables: List[str]
-    exclude_suffixes: List[str]
+    include_schemas: list[str]
+    exclude_schemas: list[str]
+    exclude_tables: list[str]
+    exclude_suffixes: list[str]
     system_tables: set
 
 
 class MigrationOrchestrator:
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
         self.engine_type = cfg.get("engine", {}).get("type", "copy")
 
@@ -94,7 +93,9 @@ class MigrationOrchestrator:
         # Safety flags
         self.allow_destructive = bool(cfg.get("engine", {}).get("allow_destructive", False))
         self.auto_ddl = bool(cfg.get("engine", {}).get("auto_ddl", True))
-        self.truncate_first = bool(cfg.get("engine", {}).get("copy", {}).get("truncate_first", True))
+        self.truncate_first = bool(
+            cfg.get("engine", {}).get("copy", {}).get("truncate_first", True)
+        )
         self.spool_dir = cfg.get("engine", {}).get("copy", {}).get("spool_dir")  # optional
 
         self.verify_inline = bool(cfg.get("engine", {}).get("verify_inline", False))
@@ -134,20 +135,24 @@ class MigrationOrchestrator:
         self.tgt_pool.putconn(c, close=close)
 
     # -------- utilities --------
-    def _fetch(self, conn, q: str, params: Tuple[Any, ...]) -> List[tuple]:
+    def _fetch(self, conn, q: str, params: tuple[Any, ...]) -> list[tuple]:
         with conn.cursor() as cur:
             cur.execute(q, params)
             return cur.fetchall()
 
-    def copy_table(self, schema: str, table: str) -> None:
+    def copy_table(self, schema: str, table: str, transfer: dict[str, Any] | None = None) -> None:
         """
         Public method invoked by plan step: op == 'copy_table'
         Ensures schema + table exist (auto-DDL if enabled), then copies data.
         """
         self.ensure_schema(schema)
         self.ensure_table_like_source(schema, table)
+        transfer = transfer or {}
+        if self.engine_type == "spark_jdbc":
+            self._copy_table_spark_jdbc(schema, table, transfer=transfer)
+            return
         self._copy_table_psycopg2(schema, table)
-    
+
     def set_session_settings(self, conn) -> None:
         """
         Runs configured SET statements.
@@ -207,11 +212,15 @@ class MigrationOrchestrator:
 
             if not self.schema_exists(tgt, schema):
                 with tgt.cursor() as cur:
-                    cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+                    cur.execute(
+                        sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+                    )
         finally:
             self._put_tgt(tgt)
 
-    def _fetch_source_columns_for_ddl(self, src_conn, schema: str, table: str) -> List[Dict[str, Any]]:
+    def _fetch_source_columns_for_ddl(
+        self, src_conn, schema: str, table: str
+    ) -> list[dict[str, Any]]:
         rows = self._fetch(
             src_conn,
             """
@@ -234,7 +243,7 @@ class MigrationOrchestrator:
             (schema, table),
         )
 
-        cols: List[Dict[str, Any]] = []
+        cols: list[dict[str, Any]] = []
         for col_name, type_sql, not_null, attidentity, default_sql in rows:
             cols.append(
                 {
@@ -247,7 +256,7 @@ class MigrationOrchestrator:
             )
         return cols
 
-    def _fetch_source_primary_key(self, src_conn, schema: str, table: str) -> List[str]:
+    def _fetch_source_primary_key(self, src_conn, schema: str, table: str) -> list[str]:
         rows = self._fetch(
             src_conn,
             """
@@ -266,7 +275,9 @@ class MigrationOrchestrator:
         )
         return [r[0] for r in rows]
 
-    def _fetch_source_partition_parent(self, src_conn, schema: str, table: str) -> Optional[Tuple[str, str]]:
+    def _fetch_source_partition_parent(
+        self, src_conn, schema: str, table: str
+    ) -> tuple[str, str] | None:
         rows = self._fetch(
             src_conn,
             """
@@ -285,7 +296,7 @@ class MigrationOrchestrator:
         )
         return (rows[0][0], rows[0][1]) if rows else None
 
-    def _fetch_source_partition_key(self, src_conn, schema: str, table: str) -> Optional[str]:
+    def _fetch_source_partition_key(self, src_conn, schema: str, table: str) -> str | None:
         rows = self._fetch(
             src_conn,
             """
@@ -300,7 +311,7 @@ class MigrationOrchestrator:
         )
         return rows[0][0] if rows else None
 
-    def _fetch_source_partition_bound(self, src_conn, schema: str, table: str) -> Optional[str]:
+    def _fetch_source_partition_bound(self, src_conn, schema: str, table: str) -> str | None:
         rows = self._fetch(
             src_conn,
             """
@@ -315,8 +326,10 @@ class MigrationOrchestrator:
         )
         return rows[0][0] if rows else None
 
-    def _ensure_sequences_for_defaults(self, tgt_conn, schema_fallback: str, default_sqls: List[str]) -> None:
-        seq_qnames: List[str] = []
+    def _ensure_sequences_for_defaults(
+        self, tgt_conn, schema_fallback: str, default_sqls: list[str]
+    ) -> None:
+        seq_qnames: list[str] = []
         for d in default_sqls:
             if not d:
                 continue
@@ -332,7 +345,11 @@ class MigrationOrchestrator:
                 else:
                     sch, seq = schema_fallback, qname
                 cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(sch)))
-                cur.execute(sql.SQL("CREATE SEQUENCE IF NOT EXISTS {}.{}").format(sql.Identifier(sch), sql.Identifier(seq)))
+                cur.execute(
+                    sql.SQL("CREATE SEQUENCE IF NOT EXISTS {}.{}").format(
+                        sql.Identifier(sch), sql.Identifier(seq)
+                    )
+                )
 
     def ensure_table_like_source(self, schema: str, table: str) -> None:
         if not self.auto_ddl:
@@ -350,7 +367,9 @@ class MigrationOrchestrator:
             # schema
             if not self.schema_exists(tgt, schema):
                 with tgt.cursor() as cur:
-                    cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+                    cur.execute(
+                        sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+                    )
 
             # table
             if self.table_exists(tgt, schema, table):
@@ -361,7 +380,9 @@ class MigrationOrchestrator:
                 parent_schema, parent_table = partition_parent
                 partition_bound = self._fetch_source_partition_bound(src, schema, table)
                 if not partition_bound:
-                    raise RuntimeError(f"Source partition {schema}.{table} is missing a partition bound")
+                    raise RuntimeError(
+                        f"Source partition {schema}.{table} is missing a partition bound"
+                    )
                 self.ensure_schema(parent_schema)
                 self.ensure_table_like_source(parent_schema, parent_table)
                 with tgt.cursor() as cur:
@@ -409,11 +430,15 @@ class MigrationOrchestrator:
             constraints = []
             if pk_cols:
                 constraints.append(
-                    sql.SQL("PRIMARY KEY ({})").format(sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols))
+                    sql.SQL("PRIMARY KEY ({})").format(
+                        sql.SQL(", ").join(sql.Identifier(x) for x in pk_cols)
+                    )
                 )
 
             if partition_key:
-                create_stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) PARTITION BY {};").format(
+                create_stmt = sql.SQL(
+                    "CREATE TABLE IF NOT EXISTS {}.{} ({}) PARTITION BY {};"
+                ).format(
                     sql.Identifier(schema),
                     sql.Identifier(table),
                     sql.SQL(", ").join(col_defs + constraints),
@@ -432,11 +457,11 @@ class MigrationOrchestrator:
         finally:
             self._put_src(src)
             self._put_tgt(tgt)
-            
+
     def _copy_table_psycopg2(self, schema: str, table: str) -> None:
         if self.truncate_first and not self.allow_destructive:
             raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
-    
+
         src = self._src()
         tgt = self._tgt()
         try:
@@ -445,14 +470,14 @@ class MigrationOrchestrator:
             tgt.autocommit = False
             self.set_session_settings(src)
             self.set_session_settings(tgt)
-    
+
             with tgt.cursor() as cur:
                 if self.truncate_first:
                     cur.execute(sql.SQL("TRUNCATE TABLE {} CASCADE").format(_fq(schema, table)))
-            
+
             copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
-            copy_in  = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
-    
+            copy_in = f'COPY "{schema}"."{table}" FROM STDIN WITH (FORMAT CSV)'
+
             with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
                 # ✅ binary temp file to handle bytes from psycopg2 COPY
                 with tempfile.NamedTemporaryFile(
@@ -463,9 +488,9 @@ class MigrationOrchestrator:
                     src_cur.copy_expert(copy_out, f)
                     f.seek(0)
                     tgt_cur.copy_expert(copy_in, f)
-    
+
             tgt.commit()
-    
+
         except Exception:
             try:
                 tgt.rollback()
@@ -475,7 +500,93 @@ class MigrationOrchestrator:
         finally:
             self._put_src(src)
             self._put_tgt(tgt)
- 
+
+    def _copy_table_spark_jdbc(self, schema: str, table: str, transfer: dict[str, Any]) -> None:
+        if transfer.get("geometry_mode") not in (None, "default") or transfer.get("has_geometry"):
+            self._copy_table_psycopg2(schema, table)
+            return
+
+        try:
+            from pyspark.sql import SparkSession
+        except Exception as exc:
+            raise RuntimeError(
+                f"spark_jdbc engine requested but pyspark is not installed: {exc}"
+            ) from exc
+
+        src_conn = self._src()
+        tgt_conn = self._tgt()
+        try:
+            src_conn.autocommit = True
+            tgt_conn.autocommit = True
+
+            chunk_column = transfer.get("chunk_column")
+            lower_bound = upper_bound = None
+            if chunk_column:
+                with src_conn.cursor() as cur:
+                    try:
+                        cur.execute(
+                            sql.SQL("SELECT MIN({}), MAX({}) FROM {}").format(
+                                sql.Identifier(chunk_column),
+                                sql.Identifier(chunk_column),
+                                _fq(schema, table),
+                            )
+                        )
+                        lower_bound, upper_bound = cur.fetchone()
+                    except Exception:
+                        chunk_column = None
+
+            if self.truncate_first:
+                if not self.allow_destructive:
+                    raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
+                with tgt_conn.cursor() as cur:
+                    cur.execute(sql.SQL("TRUNCATE TABLE {} CASCADE").format(_fq(schema, table)))
+
+            spark = SparkSession.builder.appName("AgenticDbMigrator").getOrCreate()
+            jdbc_url_src = f"jdbc:postgresql://{self.cfg['source']['host']}:{self.cfg['source'].get('port', 5432)}/{self.cfg['source']['database']}"
+            jdbc_url_tgt = f"jdbc:postgresql://{self.cfg['target']['host']}:{self.cfg['target'].get('port', 5432)}/{self.cfg['target']['database']}"
+            read_options = {
+                "url": jdbc_url_src,
+                "dbtable": f'"{schema}"."{table}"',
+                "user": self.cfg["source"]["user"],
+                "password": self.cfg["source"]["password"],
+                "driver": "org.postgresql.Driver",
+                "fetchsize": "10000",
+            }
+            chunk_count = int(transfer.get("chunk_count") or 1)
+            if (
+                chunk_column
+                and lower_bound is not None
+                and upper_bound is not None
+                and lower_bound != upper_bound
+            ):
+                read_options.update(
+                    {
+                        "partitionColumn": chunk_column,
+                        "lowerBound": str(lower_bound),
+                        "upperBound": str(upper_bound),
+                        "numPartitions": str(chunk_count),
+                    }
+                )
+
+            df = spark.read.format("jdbc").options(**read_options).load()
+            if chunk_count > 1 and "numPartitions" not in read_options:
+                df = df.repartition(chunk_count)
+
+            write_options = {
+                "url": jdbc_url_tgt,
+                "dbtable": f'"{schema}"."{table}"',
+                "user": self.cfg["target"]["user"],
+                "password": self.cfg["target"]["password"],
+                "driver": "org.postgresql.Driver",
+                "batchsize": str(
+                    self.cfg.get("engine", {}).get("copy", {}).get("batchsize", 10000)
+                ),
+            }
+            df.write.format("jdbc").options(**write_options).mode("append").save()
+        finally:
+            self._put_src(src_conn)
+            self._put_tgt(tgt_conn)
+
     def sync_sequences(self, schema: str, table: str) -> None:
         """
         Sync serial and identity-backed sequences to the current max value.
@@ -484,7 +595,7 @@ class MigrationOrchestrator:
         try:
             tgt.autocommit = True
             self.set_session_settings(tgt)
-    
+
             with tgt.cursor() as cur:
                 cur.execute(
                     """
@@ -502,7 +613,7 @@ class MigrationOrchestrator:
                 rows = cur.fetchall()
 
             for col, default, is_identity in rows:
-                seq_regclass: Optional[str] = None
+                seq_regclass: str | None = None
                 if is_identity == "YES":
                     with tgt.cursor() as cur:
                         cur.execute(
@@ -526,7 +637,7 @@ class MigrationOrchestrator:
                     else:
                         seq_schema, seq_name = schema, qname
                     seq_regclass = f'"{seq_schema}"."{seq_name}"'
-    
+
                 with tgt.cursor() as cur:
                     cur.execute(
                         sql.SQL("SELECT COALESCE(MAX({}), 0) FROM {}").format(
@@ -536,7 +647,7 @@ class MigrationOrchestrator:
                     )
                     mx_row = cur.fetchone()
                     mx = int(mx_row[0] or 0) if mx_row else 0
-    
+
                     if mx <= 0:
                         cur.execute("SELECT setval(%s::regclass, 1, false)", (seq_regclass,))
                     else:
@@ -544,9 +655,7 @@ class MigrationOrchestrator:
         finally:
             self._put_tgt(tgt)
 
-    
-
-    def create_indexes(self, schema: str, table: str, indexes: List[Dict[str, Any]]) -> None:
+    def create_indexes(self, schema: str, table: str, indexes: list[dict[str, Any]]) -> None:
         if not indexes:
             return
 
@@ -582,7 +691,7 @@ class MigrationOrchestrator:
         finally:
             self._put_tgt(tgt)
 
-    def add_fks(self, schema: str, fks: List[Dict[str, Any]]) -> None:
+    def add_fks(self, schema: str, fks: list[dict[str, Any]]) -> None:
         if not fks:
             return
 
@@ -615,7 +724,7 @@ class MigrationOrchestrator:
         finally:
             self._put_tgt(tgt)
 
-    def create_matviews(self, schema: str, matviews: List[Dict[str, Any]]) -> None:
+    def create_matviews(self, schema: str, matviews: list[dict[str, Any]]) -> None:
         if not matviews:
             return
 
@@ -626,26 +735,69 @@ class MigrationOrchestrator:
 
             if not self.schema_exists(tgt, schema):
                 with tgt.cursor() as cur:
-                    cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+                    cur.execute(
+                        sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+                    )
 
             for mv in matviews:
                 name = mv.get("name")
                 definition = mv.get("definition")
                 if not name or not definition:
                     continue
+                definition = definition.strip().rstrip(";")
                 if self.matview_exists(tgt, schema, name):
                     continue
-
-                stmt = sql.SQL("CREATE MATERIALIZED VIEW {} AS {} WITH DATA").format(
-                    _fq(schema, name),
-                    sql.SQL(definition),
-                )
+                strategy = mv.get("strategy", "direct_rebuild")
+                staging_table = mv.get("staging_table")
+                if strategy == "staged_rebuild" and staging_table:
+                    stmt = sql.SQL(
+                        "CREATE MATERIALIZED VIEW {} AS SELECT * FROM {} WITH DATA"
+                    ).format(
+                        _fq(schema, name),
+                        _fq(schema, staging_table),
+                    )
+                else:
+                    stmt = sql.SQL("CREATE MATERIALIZED VIEW {} AS {} WITH DATA").format(
+                        _fq(schema, name),
+                        sql.SQL(definition),
+                    )
                 with tgt.cursor() as cur:
                     cur.execute(stmt)
         finally:
             self._put_tgt(tgt)
 
-    def create_mv_indexes(self, schema: str, indexes: List[Dict[str, Any]]) -> None:
+    def stage_matviews(self, schema: str, matviews: list[dict[str, Any]]) -> None:
+        if not matviews:
+            return
+
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+
+            for mv in matviews:
+                name = mv.get("name")
+                definition = mv.get("definition")
+                staging_table = mv.get("staging_table")
+                if not (name and definition and staging_table):
+                    continue
+                definition = definition.strip().rstrip(";")
+                with tgt.cursor() as cur:
+                    cur.execute(
+                        sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
+                            _fq(schema, staging_table)
+                        )
+                    )
+                    cur.execute(
+                        sql.SQL("CREATE TABLE {} AS {}").format(
+                            _fq(schema, staging_table),
+                            sql.SQL(definition),
+                        )
+                    )
+        finally:
+            self._put_tgt(tgt)
+
+    def create_mv_indexes(self, schema: str, indexes: list[dict[str, Any]]) -> None:
         if not indexes:
             return
 
@@ -672,7 +824,7 @@ class MigrationOrchestrator:
         finally:
             self._put_tgt(tgt)
 
-    def create_udfs(self, schema: str, udfs: List[Dict[str, Any]]) -> None:
+    def create_udfs(self, schema: str, udfs: list[dict[str, Any]]) -> None:
         if not udfs:
             return
         tgt = self._tgt()
@@ -689,7 +841,75 @@ class MigrationOrchestrator:
         finally:
             self._put_tgt(tgt)
 
-    def verify_table(self, schema: str, table: str, validate: Dict[str, Any]) -> Dict[str, Any]:
+    def apply_grants(self, schema: str, grants: list[dict[str, Any]]) -> None:
+        if not grants:
+            return
+
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+            with tgt.cursor() as cur:
+                for grant in grants:
+                    grantee = grant.get("grantee")
+                    privilege = grant.get("privilege_type")
+                    object_type = grant.get("object_type")
+                    object_name = grant.get("object_name")
+                    object_schema = grant.get("schema", schema)
+                    if not grantee or not privilege:
+                        continue
+                    if object_type == "schema":
+                        stmt = sql.SQL("GRANT {} ON SCHEMA {} TO {}").format(
+                            sql.SQL(privilege),
+                            sql.Identifier(object_schema),
+                            sql.Identifier(grantee),
+                        )
+                    elif object_name:
+                        stmt = sql.SQL("GRANT {} ON TABLE {} TO {}").format(
+                            sql.SQL(privilege),
+                            _fq(object_schema, object_name),
+                            sql.Identifier(grantee),
+                        )
+                    else:
+                        continue
+                    try:
+                        cur.execute(stmt)
+                    except psycopg2.Error as exc:
+                        if exc.pgcode in ("42701", "42704"):
+                            continue
+                        raise
+        finally:
+            self._put_tgt(tgt)
+
+    def analyze_table(
+        self, schema: str, table: str, maintenance: dict[str, Any] | None = None
+    ) -> None:
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+            with tgt.cursor() as cur:
+                cur.execute(sql.SQL("ANALYZE {}").format(_fq(schema, table)))
+                if (maintenance or {}).get("cluster_if_needed"):
+                    cur.execute(sql.SQL("CLUSTER {}").format(_fq(schema, table)))
+        finally:
+            self._put_tgt(tgt)
+
+    def vacuum_analyze_table(
+        self, schema: str, table: str, maintenance: dict[str, Any] | None = None
+    ) -> None:
+        tgt = self._tgt()
+        try:
+            tgt.autocommit = True
+            self.set_session_settings(tgt)
+            with tgt.cursor() as cur:
+                cur.execute(sql.SQL("VACUUM ANALYZE {}").format(_fq(schema, table)))
+                if (maintenance or {}).get("cluster_if_needed"):
+                    cur.execute(sql.SQL("CLUSTER {}").format(_fq(schema, table)))
+        finally:
+            self._put_tgt(tgt)
+
+    def verify_table(self, schema: str, table: str, validate: dict[str, Any]) -> dict[str, Any]:
         import hashlib
 
         sample_hash = bool((validate or {}).get("sample_hash", False))
@@ -731,7 +951,9 @@ class MigrationOrchestrator:
                         )
                         cur.execute(q, (sample_rows,))
                     else:
-                        q = sql.SQL("SELECT * FROM {} ORDER BY 1 LIMIT %s").format(_fq(schema, table))
+                        q = sql.SQL("SELECT * FROM {} ORDER BY 1 LIMIT %s").format(
+                            _fq(schema, table)
+                        )
                         cur.execute(q, (sample_rows,))
                     rows = cur.fetchall()
 
@@ -743,12 +965,56 @@ class MigrationOrchestrator:
             src_n = count_rows(src)
             tgt_n = count_rows(tgt)
 
-            out = {"schema": schema, "table": table, "source_rows": src_n, "target_rows": tgt_n, "ok": (src_n == tgt_n)}
+            out = {
+                "schema": schema,
+                "table": table,
+                "source_rows": src_n,
+                "target_rows": tgt_n,
+                "ok": (src_n == tgt_n),
+            }
             if sample_hash:
                 out["source_sample_hash"] = sample_fingerprint(src)
                 out["target_sample_hash"] = sample_fingerprint(tgt)
-                out["sample_hash_ok"] = (out["source_sample_hash"] == out["target_sample_hash"])
+                out["sample_hash_ok"] = out["source_sample_hash"] == out["target_sample_hash"]
                 out["ok"] = out["ok"] and out["sample_hash_ok"]
+
+            if bool((validate or {}).get("partition_fidelity", False)):
+                src_children = {
+                    (row[0], row[1], row[2] or "")
+                    for row in self._fetch(
+                        src,
+                        """
+                        SELECT cn.nspname, child.relname, pg_get_expr(child.relpartbound, child.oid)
+                        FROM pg_inherits i
+                        JOIN pg_class parent ON parent.oid = i.inhparent
+                        JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+                        JOIN pg_class child ON child.oid = i.inhrelid
+                        JOIN pg_namespace cn ON cn.oid = child.relnamespace
+                        WHERE pn.nspname = %s AND parent.relname = %s
+                        ORDER BY cn.nspname, child.relname
+                        """,
+                        (schema, table),
+                    )
+                }
+                tgt_children = {
+                    (row[0], row[1], row[2] or "")
+                    for row in self._fetch(
+                        tgt,
+                        """
+                        SELECT cn.nspname, child.relname, pg_get_expr(child.relpartbound, child.oid)
+                        FROM pg_inherits i
+                        JOIN pg_class parent ON parent.oid = i.inhparent
+                        JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+                        JOIN pg_class child ON child.oid = i.inhrelid
+                        JOIN pg_namespace cn ON cn.oid = child.relnamespace
+                        WHERE pn.nspname = %s AND parent.relname = %s
+                        ORDER BY cn.nspname, child.relname
+                        """,
+                        (schema, table),
+                    )
+                }
+                out["partition_children_ok"] = src_children == tgt_children
+                out["ok"] = out["ok"] and out["partition_children_ok"]
             return out
         finally:
             self._put_src(src)
@@ -756,18 +1022,22 @@ class MigrationOrchestrator:
 
 
 def execute(
-    cfg: Dict[str, Any],
-    plan_path: Optional[str] = None,
+    cfg: dict[str, Any],
+    plan_path: str | None = None,
     state_path: str = "state.json",
-    plan_obj: Optional[Dict[str, Any]] = None,
+    plan_obj: dict[str, Any] | None = None,
 ) -> None:
     orch = MigrationOrchestrator(cfg)
     state_file = Path(state_path)
 
-    state = _read_json(state_file) if state_file.exists() else {"completed": {}, "started_at": time.time()}
+    state = (
+        _read_json(state_file)
+        if state_file.exists()
+        else {"completed": {}, "started_at": time.time()}
+    )
     completed = state.get("completed", {})
 
-    def mark(step_id: str, payload: Dict[str, Any]) -> None:
+    def mark(step_id: str, payload: dict[str, Any]) -> None:
         completed[step_id] = payload
         state["completed"] = completed
         state["updated_at"] = time.time()
@@ -803,7 +1073,9 @@ def execute(
                     orch.ensure_table_like_source(step["schema"], step["table"])
 
                 elif op == "copy_table":
-                    orch.copy_table(step["schema"], step["table"])
+                    orch.copy_table(
+                        step["schema"], step["table"], transfer=step.get("transfer", {}) or {}
+                    )
 
                 elif op == "sync_sequences":
                     orch.sync_sequences(step["schema"], step["table"])
@@ -814,17 +1086,38 @@ def execute(
                 elif op == "add_fks":
                     orch.add_fks(step["schema"], step.get("fks", []))
 
+                elif op == "apply_grants":
+                    orch.apply_grants(step["schema"], step.get("grants", []))
+
+                elif op == "stage_matviews":
+                    orch.stage_matviews(step["schema"], step.get("matviews", []))
+
                 elif op == "create_matviews":
                     orch.create_matviews(step["schema"], step.get("matviews", []))
 
                 elif op == "create_mv_indexes":
                     orch.create_mv_indexes(step["schema"], step.get("indexes", []))
 
+                elif op == "analyze_table":
+                    orch.analyze_table(
+                        step["schema"], step["table"], maintenance=step.get("maintenance", {}) or {}
+                    )
+
+                elif op == "vacuum_analyze_table":
+                    orch.vacuum_analyze_table(
+                        step["schema"], step["table"], maintenance=step.get("maintenance", {}) or {}
+                    )
+
                 elif op == "verify_table":
-                    rep = orch.verify_table(step["schema"], step["table"], step.get("validate", {}) or {})
+                    rep = orch.verify_table(
+                        step["schema"], step["table"], step.get("validate", {}) or {}
+                    )
                     if not rep.get("ok", False):
                         raise RuntimeError(f"Verification failed: {rep}")
-                    mark(step_id, {"ok": True, "elapsed_s": round(time.time() - t0, 3), "verify": rep})
+                    mark(
+                        step_id,
+                        {"ok": True, "elapsed_s": round(time.time() - t0, 3), "verify": rep},
+                    )
                     print(f"✅ {op} OK in {round(time.time()-t0,3)}s")
                     continue
 
@@ -835,7 +1128,9 @@ def execute(
                 print(f"✅ {op} OK in {round(time.time()-t0,3)}s")
 
             except Exception as e:
-                mark(step_id, {"ok": False, "elapsed_s": round(time.time() - t0, 3), "error": str(e)})
+                mark(
+                    step_id, {"ok": False, "elapsed_s": round(time.time() - t0, 3), "error": str(e)}
+                )
                 print(f"❌ {op} failed: {e}")
                 raise
 

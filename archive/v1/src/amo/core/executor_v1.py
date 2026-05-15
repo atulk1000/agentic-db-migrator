@@ -1,33 +1,37 @@
 from __future__ import annotations
 
-import re
 import json
+import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any
 
 import psycopg2
 from psycopg2 import sql
-
 
 # -----------------------------
 # Helpers
 # -----------------------------
 
-def _dsn(db_cfg: Dict[str, Any]) -> str:
+
+def _dsn(db_cfg: dict[str, Any]) -> str:
     return (
         f"host={db_cfg['host']} port={db_cfg['port']} dbname={db_cfg['database']} "
         f"user={db_cfg['user']} password={db_cfg['password']}"
     )
 
-def _load_json(path: str | Path) -> Dict[str, Any]:
+
+def _load_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
 
-def _write_json(path: str | Path, obj: Dict[str, Any]) -> None:
+
+def _write_json(path: str | Path, obj: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(obj, indent=2, sort_keys=True))
+
 
 def _fq(schema: str, table: str) -> str:
     return f'"{schema}"."{table}"'
+
 
 def _schema_exists(conn, schema: str) -> bool:
     with conn.cursor() as cur:
@@ -36,6 +40,7 @@ def _schema_exists(conn, schema: str) -> bool:
             (schema,),
         )
         return cur.fetchone() is not None
+
 
 def _table_exists(conn, schema: str, table: str) -> bool:
     with conn.cursor() as cur:
@@ -49,14 +54,17 @@ def _table_exists(conn, schema: str, table: str) -> bool:
         )
         return cur.fetchone() is not None
 
+
 def _count_rows(conn, schema: str, table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"SELECT COUNT(*) FROM {_fq(schema, table)};")
         return int(cur.fetchone()[0])
 
+
 _NEXTVAL_RE = re.compile(r"nextval\('([^']+)'\s*(?:::regclass)?\)", re.IGNORECASE)
 
-def _extract_nextval_seq_qnames(default_sql: Optional[str]) -> List[str]:
+
+def _extract_nextval_seq_qnames(default_sql: str | None) -> list[str]:
     """
     Returns list of sequence qualified names referenced by nextval('...').
     Works for: nextval('schema.seq'::regclass) and nextval('schema.seq')
@@ -64,6 +72,7 @@ def _extract_nextval_seq_qnames(default_sql: Optional[str]) -> List[str]:
     if not default_sql:
         return []
     return _NEXTVAL_RE.findall(default_sql)
+
 
 def _split_qname(qname: str, fallback_schema: str) -> tuple[str, str]:
     """
@@ -77,7 +86,10 @@ def _split_qname(qname: str, fallback_schema: str) -> tuple[str, str]:
         return sch, name
     return fallback_schema, qname
 
-def _ensure_target_sequences_for_create(tgt_conn, seq_qnames: List[str], fallback_schema: str) -> None:
+
+def _ensure_target_sequences_for_create(
+    tgt_conn, seq_qnames: list[str], fallback_schema: str
+) -> None:
     """
     Creates any sequences referenced by nextval(...) defaults.
     Must run before CREATE TABLE that references them.
@@ -100,6 +112,7 @@ def _ensure_target_sequences_for_create(tgt_conn, seq_qnames: List[str], fallbac
 # -----------------------------
 # Auto-DDL from source
 # -----------------------------
+
 
 def _fetch_source_columns(conn, schema: str, table: str):
     """
@@ -142,6 +155,7 @@ def _fetch_source_columns(conn, schema: str, table: str):
         )
     return cols
 
+
 def _fetch_source_primary_key(conn, schema: str, table: str):
     """
     Returns list of PK columns in order, or [] if none.
@@ -164,6 +178,7 @@ def _fetch_source_primary_key(conn, schema: str, table: str):
         )
         return [r[0] for r in cur.fetchall()]
 
+
 def _ensure_target_schema_and_table_like_source(
     src_conn,
     tgt_conn,
@@ -179,9 +194,7 @@ def _ensure_target_schema_and_table_like_source(
     # Create schema if missing
     if not _schema_exists(tgt_conn, schema):
         with tgt_conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
-            )
+            cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
 
     # Create table if missing
     if _table_exists(tgt_conn, schema, table):
@@ -194,7 +207,7 @@ def _ensure_target_schema_and_table_like_source(
     pk_cols = _fetch_source_primary_key(src_conn, schema, table)
 
     col_defs_sql = []
-    seq_qnames: List[str] = []
+    seq_qnames: list[str] = []
 
     for c in cols:
         parts = [sql.Identifier(c["name"]), sql.SQL(c["type_sql"])]
@@ -238,13 +251,14 @@ def _ensure_target_schema_and_table_like_source(
 # COPY pipeline
 # -----------------------------
 
+
 def _copy_table_csv(
     src_conn,
     tgt_conn,
     schema: str,
     table: str,
     truncate_first: bool = True,
-    statement_timeout_ms: Optional[int] = None,
+    statement_timeout_ms: int | None = None,
     auto_ddl: bool = False,
 ) -> None:
     """
@@ -281,10 +295,11 @@ def _copy_table_csv(
             tgt_cur.execute(f"TRUNCATE TABLE {_fq(schema, table)};")
 
         with src_conn.cursor() as src_cur:
-            copy_out = f'COPY (SELECT * FROM {_fq(schema, table)}) TO STDOUT WITH (FORMAT CSV, HEADER false)'
-            copy_in  = f'COPY {_fq(schema, table)} FROM STDIN WITH (FORMAT CSV, HEADER false)'
+            copy_out = f"COPY (SELECT * FROM {_fq(schema, table)}) TO STDOUT WITH (FORMAT CSV, HEADER false)"
+            copy_in = f"COPY {_fq(schema, table)} FROM STDIN WITH (FORMAT CSV, HEADER false)"
 
             import io
+
             buf = io.StringIO()
             src_cur.copy_expert(copy_out, buf)
             buf.seek(0)
@@ -295,7 +310,8 @@ def _copy_table_csv(
 # Executor (V1)
 # -----------------------------
 
-def execute(cfg: Dict[str, Any], plan_path: str, state_path: str) -> None:
+
+def execute(cfg: dict[str, Any], plan_path: str, state_path: str) -> None:
     plan = _load_json(plan_path)
 
     state_file = Path(state_path)
@@ -317,7 +333,7 @@ def execute(cfg: Dict[str, Any], plan_path: str, state_path: str) -> None:
     src_dsn = _dsn(src_cfg)
     tgt_dsn = _dsn(tgt_cfg)
 
-    steps: List[Dict[str, Any]] = plan.get("steps", [])
+    steps: list[dict[str, Any]] = plan.get("steps", [])
     if not steps:
         raise RuntimeError("plan.json has no steps. Did your planner write steps?")
 
@@ -369,7 +385,9 @@ def execute(cfg: Dict[str, Any], plan_path: str, state_path: str) -> None:
                 state["updated_at"] = time.time()
                 _write_json(state_file, state)
 
-                print(f"✅ {schema}.{table} done (src={src_n}, tgt={tgt_n}) in {completed[step_id]['elapsed_s']}s")
+                print(
+                    f"✅ {schema}.{table} done (src={src_n}, tgt={tgt_n}) in {completed[step_id]['elapsed_s']}s"
+                )
 
             except Exception as e:
                 tgt_conn.rollback()

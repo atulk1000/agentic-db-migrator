@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any
 
-from amo.core.planners.models import MigrationManifest, ManifestTable, validate_plan_document
-
+from amo.core.planners.models import ManifestTable, MigrationManifest, validate_plan_document
 
 DEFAULT_SAMPLE_ROWS = 50
 
@@ -26,7 +25,7 @@ def root_tables(manifest: MigrationManifest) -> list[ManifestTable]:
     ]
 
 
-def default_validate(table: ManifestTable) -> Dict[str, Any]:
+def default_validate(table: ManifestTable) -> dict[str, Any]:
     estimated_rows = int(table.estimated_rows or 0)
     sample_hash = estimated_rows <= 100_000
     return {
@@ -36,7 +35,9 @@ def default_validate(table: ManifestTable) -> Dict[str, Any]:
     }
 
 
-def infer_table_from_name(schema: str, name: Optional[str], known_tables: Dict[str, ManifestTable]) -> Optional[str]:
+def infer_table_from_name(
+    schema: str, name: str | None, known_tables: dict[str, ManifestTable]
+) -> str | None:
     if not name:
         return None
 
@@ -52,7 +53,9 @@ def infer_table_from_name(schema: str, name: Optional[str], known_tables: Dict[s
     return None
 
 
-def normalize_validate(op: str, step: Dict[str, Any], table_info: Optional[ManifestTable]) -> Dict[str, Any]:
+def normalize_validate(
+    op: str, step: dict[str, Any], table_info: ManifestTable | None
+) -> dict[str, Any]:
     validate = dict(step.get("validate") or {})
     if op not in ("verify_table", "copy_table"):
         return validate
@@ -67,7 +70,9 @@ def normalize_validate(op: str, step: Dict[str, Any], table_info: Optional[Manif
         elif mode == "rowcount":
             validate["sample_hash"] = False
         else:
-            validate["sample_hash"] = default_validate(table_info)["sample_hash"] if table_info else False
+            validate["sample_hash"] = (
+                default_validate(table_info)["sample_hash"] if table_info else False
+            )
 
     if "sample_rows" not in validate:
         validate["sample_rows"] = DEFAULT_SAMPLE_ROWS
@@ -75,8 +80,10 @@ def normalize_validate(op: str, step: Dict[str, Any], table_info: Optional[Manif
     return validate
 
 
-def normalize_llm_plan(plan: Dict[str, Any], manifest: MigrationManifest) -> Dict[str, Any]:
-    known_tables = {table_key(table.schema_name, table.table): table for table in root_tables(manifest)}
+def normalize_llm_plan(plan: dict[str, Any], manifest: MigrationManifest) -> dict[str, Any]:
+    known_tables = {
+        table_key(table.schema_name, table.table): table for table in root_tables(manifest)
+    }
 
     normalized = dict(plan)
     normalized.setdefault("version", "v2")
@@ -109,7 +116,9 @@ def normalize_llm_plan(plan: Dict[str, Any], manifest: MigrationManifest) -> Dic
             step["validate"] = normalize_validate(op, step, table_info)
 
         if op == "create_indexes" and table_info is not None and not step.get("indexes"):
-            step["indexes"] = [index_info.model_dump(mode="python") for index_info in table_info.indexes]
+            step["indexes"] = [
+                index_info.model_dump(mode="python") for index_info in table_info.indexes
+            ]
 
         if op == "add_fks":
             if not step.get("fks") and schema and table:
@@ -130,11 +139,11 @@ def normalize_llm_plan(plan: Dict[str, Any], manifest: MigrationManifest) -> Dic
 
 
 def parse_normalize_and_validate_llm_plan(
-    raw_plan: str | Dict[str, Any],
+    raw_plan: str | dict[str, Any],
     manifest: MigrationManifest,
     planner_name: str,
-    planner_metadata: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    planner_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     parsed = json.loads(raw_plan) if isinstance(raw_plan, str) else dict(raw_plan)
     normalized = normalize_llm_plan(parsed, manifest)
     normalized["planner"] = planner_name

@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import psycopg2
 
 
-def _dsn(db_cfg: Dict[str, Any]) -> str:
+def _dsn(db_cfg: dict[str, Any]) -> str:
     return (
         f"host={db_cfg['host']} port={db_cfg.get('port', 5432)} dbname={db_cfg['database']} "
         f"user={db_cfg['user']} password={db_cfg['password']}"
@@ -19,11 +19,11 @@ def _fq(schema: str, table: str) -> str:
     return f'"{schema}"."{table}"'
 
 
-def _read_json(path: str | Path) -> Dict[str, Any]:
+def _read_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
 
 
-def write_report(report: Dict[str, Any], out_path: str | Path) -> None:
+def write_report(report: dict[str, Any], out_path: str | Path) -> None:
     Path(out_path).write_text(json.dumps(report, indent=2, sort_keys=True))
 
 
@@ -67,9 +67,9 @@ def _sample_hash(conn, schema: str, table: str, sample_rows: int = 50) -> str:
     return h.hexdigest()
 
 
-def verify_plan(cfg: Dict[str, Any], plan_path: str) -> Dict[str, Any]:
+def verify_plan(cfg: dict[str, Any], plan_path: str) -> dict[str, Any]:
     plan = _read_json(plan_path)
-    steps: List[Dict[str, Any]] = plan.get("steps", [])
+    steps: list[dict[str, Any]] = plan.get("steps", [])
     if not steps:
         raise RuntimeError("plan.json has no steps to verify.")
 
@@ -92,9 +92,9 @@ def verify_plan(cfg: Dict[str, Any], plan_path: str) -> Dict[str, Any]:
 
             src_rows = _count_rows(src_conn, schema, table)
             tgt_rows = _count_rows(tgt_conn, schema, table)
-            ok = (src_rows == tgt_rows)
+            ok = src_rows == tgt_rows
 
-            row_obj: Dict[str, Any] = {
+            row_obj: dict[str, Any] = {
                 "schema": schema,
                 "table": table,
                 "source_rows": src_rows,
@@ -104,9 +104,15 @@ def verify_plan(cfg: Dict[str, Any], plan_path: str) -> Dict[str, Any]:
 
             if bool(validate.get("sample_hash", False)):
                 sample_rows = int(validate.get("sample_rows", 50))
-                row_obj["source_sample_hash"] = _sample_hash(src_conn, schema, table, sample_rows=sample_rows)
-                row_obj["target_sample_hash"] = _sample_hash(tgt_conn, schema, table, sample_rows=sample_rows)
-                row_obj["sample_hash_ok"] = (row_obj["source_sample_hash"] == row_obj["target_sample_hash"])
+                row_obj["source_sample_hash"] = _sample_hash(
+                    src_conn, schema, table, sample_rows=sample_rows
+                )
+                row_obj["target_sample_hash"] = _sample_hash(
+                    tgt_conn, schema, table, sample_rows=sample_rows
+                )
+                row_obj["sample_hash_ok"] = (
+                    row_obj["source_sample_hash"] == row_obj["target_sample_hash"]
+                )
                 ok = ok and row_obj["sample_hash_ok"]
                 row_obj["ok"] = ok
 

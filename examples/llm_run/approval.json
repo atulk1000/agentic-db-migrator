@@ -1,0 +1,14 @@
+{
+  "allow_destructive": false,
+  "approved_at": "2026-05-15T00:05:00+00:00",
+  "approved_by": "example-reviewer",
+  "approved_manual_review_items": [],
+  "approved_mode": "safe_sync",
+  "excluded_tables": [],
+  "included_tables": [
+    "analytics.events"
+  ],
+  "notes": "Approve LLM-recommended large-table copy and post-load maintenance.",
+  "plan_path": "examples/llm_run/validated_plan.json",
+  "summary_path": "examples/llm_run/pre_migration_summary.json"
+}

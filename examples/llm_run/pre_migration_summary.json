@@ -1,0 +1,48 @@
+{
+  "destructive_actions": [],
+  "drift_summary": {
+    "metadata_diff": 0,
+    "metadata_match": 0,
+    "missing_in_source": 0,
+    "missing_in_target": 1,
+    "source_tables": 1,
+    "target_tables": 0
+  },
+  "manual_review_required": [],
+  "overview": {
+    "manual_review_count": 0,
+    "mode": "safe_sync",
+    "planner": "gemini",
+    "skipped_tables": 0,
+    "source_tables": 1,
+    "tables_to_copy": 1,
+    "tables_to_sync_metadata": 0,
+    "target_tables": 0
+  },
+  "planner_recommendation": "Proceed after approval. Use bounded verification and post-load maintenance for the large events table.",
+  "preflight_warnings": [
+    "analytics.events exceeds 1M estimated rows.",
+    "Large materialized view should be staged or refreshed after base table copy."
+  ],
+  "table_recommendations": [
+    {
+      "action": "copy",
+      "chunk_column": "event_ts",
+      "chunk_count": 5,
+      "concurrency_hint": 2,
+      "diff_status": "missing_in_target",
+      "manual_review_required": false,
+      "rationale": "Large append-like event table with timestamp column suitable for chunked copy.",
+      "risk_level": "medium",
+      "risk_score": 45,
+      "schema": "analytics",
+      "table": "events",
+      "transfer_strategy": "chunked_copy",
+      "verification_depth": "rowcount",
+      "warnings": [
+        "Large row volume",
+        "Materialized view depends on copied table"
+      ]
+    }
+  ]
+}

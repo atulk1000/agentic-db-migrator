@@ -1,0 +1,39 @@
+{
+  "case_count": 2,
+  "fallback_count": 0,
+  "passed_count": 2,
+  "planner": "heuristic",
+  "schema_validation_pass_rate": 1.0,
+  "results": [
+    {
+      "case": "partitioned_table_case",
+      "description": "A partitioned table should preserve partition-aware copy and verification behavior.",
+      "elapsed_ms": 21.4,
+      "error": null,
+      "fallback_reason": null,
+      "forbidden_ops": [],
+      "missing_required_tables": [],
+      "partition_fidelity_missing": [],
+      "passed": true,
+      "planner": "heuristic_v2",
+      "sample_hash_missing": [],
+      "step_count": 10,
+      "validation_passed": true
+    },
+    {
+      "case": "small_schema_diff",
+      "description": "A small source schema has one table missing in target and one table already matching.",
+      "elapsed_ms": 19.2,
+      "error": null,
+      "fallback_reason": null,
+      "forbidden_ops": [],
+      "missing_required_tables": [],
+      "partition_fidelity_missing": [],
+      "passed": true,
+      "planner": "heuristic_v2",
+      "sample_hash_missing": [],
+      "step_count": 13,
+      "validation_passed": true
+    }
+  ]
+}
