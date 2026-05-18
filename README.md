@@ -281,13 +281,20 @@ Key labels in the UI map to CLI artifacts:
 
 ### 3. Hosted Demo Planner
 
-If you want a low-friction public demo without distributing provider credentials, use the `demo` planner and point it at a hosted planner endpoint:
+The `demo` planner is intended for public demos where repository users should not need direct Gemini or OpenAI credentials. Instead of calling a model provider from the local machine, the app can call a small hosted planning service controlled by the project owner.
+
+Configure the hosted planner endpoint with:
 
 ```powershell
-$env:DEMO_PLANNER_URL="https://your-demo-planner.example.com/plan"
+$env:DEMO_PLANNER_URL="https://<hosted-planner-domain>/plan"
 ```
 
-That endpoint is expected to receive the manifest and return a valid plan object or `{ "plan": ... }`.
+The endpoint should accept the migration manifest payload and return either:
+
+- a valid `plan.json` object
+- an object shaped as `{ "plan": ... }`
+
+If the hosted endpoint is unavailable or returns an invalid plan, the app falls back safely to the deterministic heuristic planner.
 
 ## Containerized Demo Stack
 
