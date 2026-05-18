@@ -222,9 +222,7 @@ def build_failure_analysis(
         if not payload.get("ok", False)
     ]
     failed_tables = [
-        item
-        for item in (report or {}).get("results", [])
-        if not item.get("ok", False)
+        item for item in (report or {}).get("results", []) if not item.get("ok", False)
     ]
     plan_step_map = {step.get("id"): step for step in plan.get("steps", [])}
     findings: list[dict[str, Any]] = []

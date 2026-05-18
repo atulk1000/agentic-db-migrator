@@ -606,11 +606,18 @@ def main() -> None:
             "Clarification questions",
         )
         if questions_obj:
-            with st.expander("Interactive Clarification Questions", expanded=bool(questions_obj.get("questions"))):
+            with st.expander(
+                "Interactive Clarification Questions", expanded=bool(questions_obj.get("questions"))
+            ):
                 st.json(questions_obj)
-        if st.session_state["last_rationale_path"] and Path(st.session_state["last_rationale_path"]).exists():
+        if (
+            st.session_state["last_rationale_path"]
+            and Path(st.session_state["last_rationale_path"]).exists()
+        ):
             with st.expander("Plan Rationale", expanded=False):
-                st.markdown(Path(st.session_state["last_rationale_path"]).read_text(encoding="utf-8"))
+                st.markdown(
+                    Path(st.session_state["last_rationale_path"]).read_text(encoding="utf-8")
+                )
 
     with tabs[1]:
         st.subheader("Review")
@@ -890,7 +897,9 @@ def main() -> None:
             "Failure analysis",
         )
         if failure_obj:
-            with st.expander("Post-Run Failure Analyst", expanded=bool(failure_obj.get("findings"))):
+            with st.expander(
+                "Post-Run Failure Analyst", expanded=bool(failure_obj.get("findings"))
+            ):
                 st.json(failure_obj)
 
     with tabs[5]:
