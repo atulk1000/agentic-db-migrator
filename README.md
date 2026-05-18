@@ -26,19 +26,26 @@ flowchart LR
 
 ## Why This Repo Is Interesting
 
-This is not just a one-shot migration script. The repo already includes the pieces you would expect from a more serious migration platform:
+This is not just a one-shot table-copy script. The repo is moving toward a complete PostgreSQL environment migration workflow, including data, schema objects, dependency-sensitive ordering, and post-run validation. It already includes the pieces you would expect from a more serious migration platform:
 
 - source and target discovery
 - deterministic drift analysis
+- schema/table DDL planning
+- partitioned-table structure replication and partition-fidelity checks
+- function/UDF recreation
+- index and foreign-key recreation
+- schema and relation grant replay
+- materialized-view recreation, including staged rebuild support
 - plan generation with strict schema validation
 - human review and approval before mutation
 - resumable execution with checkpoint state
 - verification and post-migration reporting
+- post-migration `ANALYZE` / `VACUUM ANALYZE` maintenance
 - browser-based demo/testing workflow
 - Dockerized local demo stack
 - scaffolding for large-table and partition-aware transfers
 
-It was inspired by a real-world need: replicating large Postgres datasets and partitioned structures reliably into QA or higher environments when naive copy approaches and many off-the-shelf tools are not enough.
+It was inspired by a real-world need: replicating large Postgres datasets and database structures reliably into QA or higher environments, including partitions, functions, indexes, grants, foreign keys, materialized views, and validation steps when naive copy approaches and many off-the-shelf tools are not enough.
 
 ## Reviewable Example Artifacts
 
@@ -109,14 +116,16 @@ This is the recommended path for both heuristic and LLM planning because it sepa
   - computes `manifest_diff.json`
   - generates `plan.json`
   - produces `pre_migration_summary.json`
+  - produces agentic companion artifacts: `planner_critique.json`, `clarification_questions.json`, and `planner_rationale.md`
 - `review`
-  - renders the pre-migration summary for human inspection
+  - renders the pre-migration summary, planner critique, rationale, and clarification questions for human inspection
 - `approve`
   - creates `approval.json` with the approved mode, scope, and destructive-policy choices
 - `run`
   - executes only the approved subset of the plan
 - `summarize-post`
   - produces a final post-migration summary from the plan, state file, and optional verification report
+  - writes `failure_analysis.json` and `failure_analysis.md` so failed runs have an operator-facing diagnosis
 
 ## Why This Is Better Than Direct Execute
 
@@ -128,6 +137,7 @@ The repo still exposes lower-level commands, but the approval-gated flow is stro
 - audit-friendly approval artifacts
 - scoped execution by approved tables
 - post-migration summaries instead of only raw logs
+- plan critique, rationale, clarification prompts, and failure analysis as reviewable agent artifacts
 
 ## Planner Backends
 
@@ -149,6 +159,7 @@ All LLM-backed planner paths are expected to go through the same safety gate:
 
 - provider-specific API call
 - shared prompt contract and normalization/repair of common model mistakes
+- one bounded self-healing repair attempt when model JSON fails validation
 - strict plan validation
 - heuristic fallback if the output is still invalid
 
@@ -159,8 +170,20 @@ The AI layer is deliberately structured and inspectable:
 - the active Gemini/OpenAI prompt is versioned in [`src/amo/core/planners/prompts/migration_planner_v1.md`](src/amo/core/planners/prompts/migration_planner_v1.md)
 - Gemini and OpenAI planning receive both source metadata and drift context during `analyze`
 - model output is normalized through [`llm_common.py`](src/amo/core/planners/llm_common.py)
+- invalid model output is sent through one repair pass before fallback
 - every accepted plan is validated against strict Pydantic schemas before execution
 - invalid or unavailable model output falls back to the deterministic heuristic planner
+
+### Agentic Companion Artifacts
+
+The app now adds bounded, human-in-the-loop agent behaviors without making execution autonomous:
+
+- `planner_critique.json`: critic-agent findings for missing verification, manual-review items, warnings, and risk-sensitive gaps
+- `clarification_questions.json`: suggested operator questions when the plan contains ambiguity or manual-review routing
+- `planner_rationale.md`: human-readable explanation of table decisions, risk, strategy, and verification choices
+- `failure_analysis.md`: post-run analyst summary for execution or verification failures
+
+These artifacts make the system more agentic while preserving the safety boundary: they advise, explain, and route decisions, but they do not execute arbitrary SQL or bypass approval.
 
 Run planner evals with:
 

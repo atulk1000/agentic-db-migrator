@@ -32,6 +32,23 @@ def _request_gemini_plan(api_key: str, model: str, prompt: str) -> str:
     return (response.text or "").strip()
 
 
+def _request_gemini_repair(
+    api_key: str,
+    model: str,
+    prompt: str,
+    raw_plan: str | dict,
+    error: str,
+) -> str:
+    repair_prompt = (
+        f"{prompt}\n\n"
+        "The previous JSON response failed validation. Repair it once.\n"
+        "Return ONLY a corrected JSON object. Do not add markdown.\n\n"
+        f"Validation error:\n{error}\n\n"
+        f"Invalid response:\n{raw_plan}"
+    )
+    return _request_gemini_plan(api_key=api_key, model=model, prompt=repair_prompt)
+
+
 def generate_plan(
     manifest_path: str,
     context_path: str | None = None,
@@ -71,6 +88,13 @@ def generate_plan(
                 "prompt_version": PROMPT_VERSION,
                 "used_context": bool(planning_context),
             },
+            repair_callback=lambda raw_plan, error: _request_gemini_repair(
+                api_key=api_key,
+                model=model,
+                prompt=prompt,
+                raw_plan=raw_plan,
+                error=error,
+            ),
         )
     except Exception as exc:
         return generate_fallback_plan(

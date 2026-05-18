@@ -21,6 +21,13 @@ from amo.core.analysis import (
     render_pre_migration_summary,
     write_json,
 )
+from amo.core.agentic import (
+    build_clarification_questions,
+    build_failure_analysis,
+    build_planner_critique,
+    render_failure_analysis,
+    render_plan_rationale,
+)
 from amo.core.config import load_config, load_env
 from amo.core.manifest_builder import write_manifest
 from amo.core.planners.heuristic_planner import write_plan
@@ -121,6 +128,9 @@ def analyze(
     plan_path = out_root / "plan.json"
     pre_summary_path = out_root / "pre_migration_summary.json"
     pre_summary_text_path = out_root / "pre_migration_summary.md"
+    critique_path = out_root / "planner_critique.json"
+    rationale_path = out_root / "planner_rationale.md"
+    questions_path = out_root / "clarification_questions.json"
 
     write_json(source_manifest_path, source_manifest)
     write_json(target_manifest_path, target_manifest)
@@ -146,12 +156,24 @@ def analyze(
     write_json(pre_summary_path, pre_summary)
     pre_summary_text_path.write_text(render_pre_migration_summary(pre_summary), encoding="utf-8")
 
+    critique = build_planner_critique(plan_obj, pre_summary, manifest_diff)
+    questions = build_clarification_questions(pre_summary, manifest_diff)
+    write_json(critique_path, critique)
+    write_json(questions_path, questions)
+    rationale_path.write_text(
+        render_plan_rationale(plan_obj, pre_summary, critique),
+        encoding="utf-8",
+    )
+
     typer.echo(f"Wrote analysis artifacts to {out_root}")
     typer.echo(f"- source manifest: {source_manifest_path}")
     typer.echo(f"- target manifest: {target_manifest_path}")
     typer.echo(f"- diff: {diff_path}")
     typer.echo(f"- plan: {plan_path}")
     typer.echo(f"- pre-migration summary: {pre_summary_path}")
+    typer.echo(f"- planner critique: {critique_path}")
+    typer.echo(f"- clarification questions: {questions_path}")
+    typer.echo(f"- planner rationale: {rationale_path}")
 
 
 @app.command()
@@ -312,7 +334,18 @@ def summarize_post(
 
     text_path = Path(out).with_suffix(".md")
     text_path.write_text(render_post_migration_summary(summary), encoding="utf-8")
+    failure_analysis = build_failure_analysis(
+        plan=plan_obj,
+        state=state_obj,
+        report=report_obj,
+        pre_summary=pre_summary_obj,
+    )
+    failure_json_path = Path(out).with_name("failure_analysis.json")
+    failure_md_path = Path(out).with_name("failure_analysis.md")
+    write_json(failure_json_path, failure_analysis)
+    failure_md_path.write_text(render_failure_analysis(failure_analysis), encoding="utf-8")
     typer.echo(f"Wrote post-migration summary to {out}")
+    typer.echo(f"Wrote failure analysis to {failure_md_path}")
 
 
 if __name__ == "__main__":

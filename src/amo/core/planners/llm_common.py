@@ -143,11 +143,26 @@ def parse_normalize_and_validate_llm_plan(
     manifest: MigrationManifest,
     planner_name: str,
     planner_metadata: dict[str, Any] | None = None,
+    repair_callback: Any | None = None,
 ) -> dict[str, Any]:
-    parsed = json.loads(raw_plan) if isinstance(raw_plan, str) else dict(raw_plan)
-    normalized = normalize_llm_plan(parsed, manifest)
-    normalized["planner"] = planner_name
-    normalized.setdefault("planner_metadata", {})
-    if planner_metadata:
-        normalized["planner_metadata"].update(planner_metadata)
-    return validate_plan_document(normalized)
+    metadata = dict(planner_metadata or {})
+
+    def _attempt(candidate: str | dict[str, Any], repair_attempted: bool = False) -> dict[str, Any]:
+        parsed = json.loads(candidate) if isinstance(candidate, str) else dict(candidate)
+        normalized = normalize_llm_plan(parsed, manifest)
+        normalized["planner"] = planner_name
+        normalized.setdefault("planner_metadata", {})
+        normalized["planner_metadata"].update(metadata)
+        normalized["planner_metadata"]["repair_attempted"] = repair_attempted
+        return validate_plan_document(normalized)
+
+    try:
+        return _attempt(raw_plan)
+    except Exception as first_exc:
+        if repair_callback is None:
+            raise
+
+        repaired = repair_callback(raw_plan=raw_plan, error=str(first_exc))
+        repaired_plan = _attempt(repaired, repair_attempted=True)
+        repaired_plan["planner_metadata"]["repair_succeeded"] = True
+        return repaired_plan
