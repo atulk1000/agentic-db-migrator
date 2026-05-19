@@ -265,14 +265,30 @@ streamlit run streamlit_app.py
 
 The browser UI is not a separate migration engine. It drives the same underlying project functions as the CLI and is intended to make the full workflow easier to inspect:
 
+- config
 - analyze
 - review
 - approve
 - run
 - summarize-post
 
+The first browser step is `Config`. It can either select an existing YAML config or generate one from source and target database connection fields. The generated config is written as a normal project config file, so the same artifact can be reused by the CLI and MCP tools. PostgreSQL is the supported database engine today; the UI includes source and target database-type selectors so additional database adapters can be added later without changing the approval-gated workflow.
+
+Streamlit tab overview:
+
+| Tab | Purpose | Primary artifacts |
+| --- | --- | --- |
+| `Config` | Select an existing YAML config or generate one from source/target DB fields. Passwords are masked in the preview. | `runs/streamlit_config.yaml` or selected config file |
+| `Analyze` | Discover source and target, compute drift, generate the plan, and create pre-migration review artifacts. | `source_manifest.json`, `target_manifest.json`, `manifest_diff.json`, `plan.json`, `pre_migration_summary.json`, `planner_critique.json`, `clarification_questions.json`, `planner_rationale.md` |
+| `Review` | Inspect the pre-migration summary, drift, table recommendations, planner critique, and clarification questions before approving execution. | `pre_migration_summary.json` |
+| `Approve` | Choose included/excluded tables, approve manual-review items, set destructive-action policy, and write an approval artifact. The UI blocks tables from being both included and excluded. | `approval.json` |
+| `Run` | Execute only the approved subset of the validated plan with checkpointed state. | timestamped `state_*.json` |
+| `Post Summary` | Build a tabular post-run summary and failure analysis from plan, state, pre-summary, and optional verification report. | `post_migration_summary.json`, `post_migration_summary.md`, `failure_analysis.json`, `failure_analysis.md` |
+| `Artifacts` | Show the active config and generated artifact paths so the run can be audited or reused from CLI/MCP. | all generated workflow artifacts |
+
 Key labels in the UI map to CLI artifacts:
 
+- `Active Config File` -> YAML config used by analyze/run
 - `Migration Plan File` -> `plan.json`
 - `Run State File` -> execution state produced during `run`
 - `Pre-Migration Summary File` -> `pre_migration_summary.json`
@@ -295,6 +311,44 @@ The endpoint should accept the migration manifest payload and return either:
 - an object shaped as `{ "plan": ... }`
 
 If the hosted endpoint is unavailable or returns an invalid plan, the app falls back safely to the deterministic heuristic planner.
+
+## MCP Server Mode
+
+The repo now includes an MCP server MVP so external AI assistants can interact with the migration workflow through a governed tool/resource layer. The design is documented in [`docs/mcp_server_prd.md`](docs/mcp_server_prd.md).
+
+Run the server locally with:
+
+```powershell
+amo-mcp
+```
+
+Or directly:
+
+```powershell
+python -m amo.mcp_server
+```
+
+The first MCP version is intentionally read/review oriented. It exposes tools for:
+
+- running analysis and generating review artifacts
+- listing and reading safe migration artifacts
+- validating `plan.json`
+- generating planner critique, clarification questions, and rationale
+- building post-migration summary and failure analysis artifacts
+
+It also exposes read-only resources such as:
+
+- `policy://allowed-operations`
+- `manifest://source/latest`
+- `manifest://target/latest`
+- `drift://latest`
+- `plan://latest`
+- `summary://pre/latest`
+- `critique://latest`
+- `questions://latest`
+- `rationale://latest`
+
+Mutation tools are deliberately excluded from the MVP. Future execution-oriented MCP tools should require approval artifacts, explicit confirmation, and the same deterministic executor safeguards used by the CLI and Streamlit workflows.
 
 ## Containerized Demo Stack
 
@@ -385,16 +439,18 @@ python -m amo.cli verify --config config.yaml --plan plan.json --out report.json
 
 ## Migration Modes
 
-The approval artifact supports:
+Migration mode is selected during `analyze` and carried into `approval.json`. It controls the recommended table actions in the pre-migration summary and the subset of plan steps that can run after approval.
 
-- `full_refresh`
-- `missing_only`
-- `metadata_diff_only`
-- `data_diff_only`
-- `safe_sync`
-- `plan_only`
+| Mode | What it is for | Typical behavior |
+| --- | --- | --- |
+| `safe_sync` | Default guided migration mode. | Copies missing or structurally compatible tables, routes unsafe structural drift to manual review, and keeps execution approval-gated. |
+| `missing_only` | Fill gaps in a target environment without refreshing already-present tables. | Copies tables that exist in source but are missing in target; skips existing target tables. |
+| `metadata_diff_only` | Bring compatible schema metadata closer to source without doing a broad data refresh. | Copies missing tables, syncs compatible auxiliary metadata drift where possible, and routes incompatible structural drift to manual review. |
+| `data_diff_only` | Focus on data movement when schemas are already compatible. | Copies structurally compatible or missing tables, while skipping schema-level objects such as UDFs/materialized views during approval filtering. |
+| `full_refresh` | Refresh approved compatible tables from source to target. | Recommends copy for compatible tables and missing targets; destructive behavior such as truncation still depends on config and approval policy. |
+| `plan_only` | Produce review artifacts without execution. | Generates analysis, plan, critique, rationale, and summary artifacts, but cannot be executed by `run`. |
 
-`plan_only` is analysis-only and cannot be executed.
+The mode is not a bypass. The executor still runs only validated, allowlisted plan operations and only after a human-created approval artifact scopes the tables and destructive-action policy.
 
 ## Artifacts
 

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import inspect
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+import yaml
 
 from amo.core.agentic import (
     build_clarification_questions,
@@ -53,6 +55,10 @@ MIGRATION_MODES: list[MigrationMode] = [
     "plan_only",
 ]
 
+DATABASE_TYPES = {
+    "PostgreSQL": "postgresql",
+}
+
 
 def _load_planner_module(planner: str):
     mod_path = PLANNER_MODULES[planner]
@@ -79,6 +85,10 @@ def _default_analysis_dir() -> str:
     return str(Path("runs") / f"streamlit_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
 
+def _default_streamlit_config_path() -> str:
+    return str(Path("runs") / "streamlit_config.yaml")
+
+
 def _capture(callable_obj, *args, **kwargs):
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -87,8 +97,96 @@ def _capture(callable_obj, *args, **kwargs):
     return result, stdout.getvalue(), stderr.getvalue()
 
 
+def _database_config(
+    *,
+    db_type: str,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+) -> dict[str, Any]:
+    return {
+        "type": db_type,
+        "host": host,
+        "port": port,
+        "database": database,
+        "user": user,
+        "password": password,
+    }
+
+
+def _build_browser_config(
+    *,
+    source: dict[str, Any],
+    target: dict[str, Any],
+    planner: str,
+    max_partitions: int,
+    batch_size: int,
+    include_schemas: list[str],
+    exclude_schemas: list[str],
+    allow_destructive: bool,
+    truncate_first: bool,
+    sample_hash: bool,
+    maintenance: str,
+) -> dict[str, Any]:
+    return {
+        "app": {"name": "agentic-migration-orchestrator"},
+        "engine": {
+            "type": "copy",
+            "auto_ddl": True,
+            "allow_destructive": allow_destructive,
+            "verify_inline": False,
+            "copy": {
+                "truncate_first": truncate_first,
+                "spool_dir": None,
+                "batchsize": batch_size,
+            },
+        },
+        "source": source,
+        "target": target,
+        "migration": {
+            "include_schemas": include_schemas,
+            "exclude_schemas": exclude_schemas,
+        },
+        "exclude_schemas": exclude_schemas,
+        "exclude_tables": ["spatial_ref_sys", "geometry_columns", "geography_columns"],
+        "exclude_suffixes": [],
+        "planning": {
+            "planner": planner,
+            "max_partitions": max_partitions,
+            "default_batch_size": batch_size,
+        },
+        "post_migration": {"maintenance": maintenance},
+        "verify": {
+            "sample_hash": sample_hash,
+            "sample_rows": 200,
+            "checks": {
+                "rowcount": True,
+                "sample_hash": sample_hash,
+                "indexes": False,
+                "primary_keys": False,
+                "matviews": False,
+                "geometry": False,
+            },
+        },
+    }
+
+
+def _write_browser_config(config: dict[str, Any], out_path: str) -> str:
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
 def _session_defaults() -> None:
     defaults = {
+        "active_config_path": "config.yaml",
+        "config_output_path": _default_streamlit_config_path(),
         "analysis_dir": _default_analysis_dir(),
         "last_plan_path": "",
         "last_summary_path": "",
@@ -241,8 +339,112 @@ def _table_recommendations(summary_obj: dict[str, Any] | None) -> list[dict[str,
     return recommendations
 
 
+def _overview_rows(summary_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    overview = summary_obj.get("overview", {})
+    return [
+        {"metric": "Mode", "value": overview.get("mode", "-")},
+        {"metric": "Planner", "value": overview.get("planner", "-")},
+        {"metric": "Source Tables", "value": overview.get("source_tables", 0)},
+        {"metric": "Target Tables", "value": overview.get("target_tables", 0)},
+        {"metric": "Copy Candidates", "value": overview.get("tables_to_copy", 0)},
+        {
+            "metric": "Metadata Sync Candidates",
+            "value": overview.get("tables_to_sync_metadata", 0),
+        },
+        {"metric": "Manual Review Required", "value": overview.get("manual_review_count", 0)},
+        {"metric": "Skipped Tables", "value": overview.get("skipped_tables", 0)},
+    ]
+
+
+def _drift_summary_rows(summary_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    drift = summary_obj.get("drift_summary", {})
+    labels = {
+        "source_tables": "Source Tables",
+        "target_tables": "Target Tables",
+        "missing_in_target": "Missing In Target",
+        "missing_in_source": "Missing In Source",
+        "metadata_match": "Metadata Match",
+        "metadata_diff": "Metadata Diff",
+    }
+    return [{"metric": label, "value": drift.get(key, 0)} for key, label in labels.items()]
+
+
+def _post_execution_rows(summary_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    execution = summary_obj.get("execution_overview", {})
+    labels = {
+        "total_steps": "Total Steps",
+        "completed_steps": "Completed Steps",
+        "failed_steps": "Failed Steps",
+        "skipped_steps": "Skipped Steps",
+        "success": "Success",
+    }
+    return [{"metric": label, "value": execution.get(key, 0)} for key, label in labels.items()]
+
+
+def _post_verification_rows(summary_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    verification = summary_obj.get("verification_summary", {})
+    rows = [
+        {"metric": "Verification OK", "value": verification.get("ok", False)},
+        {"metric": "Tables Checked", "value": verification.get("tables_checked", 0)},
+    ]
+    failed_tables = verification.get("failed_tables", [])
+    rows.append({"metric": "Failed Tables", "value": len(failed_tables)})
+    return rows
+
+
+def _list_rows(values: list[Any], column: str) -> list[dict[str, Any]]:
+    return [{column: value} for value in values]
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _safe_key(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _approval_overlap(include_tables: list[str], exclude_tables: list[str]) -> list[str]:
+    return sorted(set(include_tables).intersection(exclude_tables))
+
+
+def _approved_table_candidates(
+    summary_obj: dict[str, Any],
+    include_tables: list[str],
+    exclude_tables: list[str],
+    approved_manual_review_items: list[str],
+    allow_destructive: bool,
+    approved_mode: MigrationMode,
+) -> list[str]:
+    if approved_mode == "plan_only":
+        return []
+
+    included = set(include_tables)
+    excluded = set(exclude_tables)
+    manual = set(approved_manual_review_items)
+    approved: list[str] = []
+    for item in summary_obj.get("table_recommendations", []):
+        key = f"{item.get('schema')}.{item.get('table')}"
+        if key not in included or key in excluded:
+            continue
+        if item.get("action") == "manual_review":
+            if key in manual and allow_destructive:
+                approved.append(key)
+            continue
+        if item.get("action") in ("copy", "sync_metadata"):
+            approved.append(key)
+    return sorted(approved)
+
+
 def _workflow_status_rows() -> list[dict[str, Any]]:
     return [
+        {
+            "step": "Config",
+            "status": (
+                "Done" if _artifact_exists(st.session_state["active_config_path"]) else "Pending"
+            ),
+            "path": st.session_state["active_config_path"] or "-",
+        },
         {
             "step": "Analyze",
             "status": (
@@ -324,7 +526,35 @@ def _render_pre_summary_block(summary_obj: dict[str, Any]) -> None:
     c2.metric("Metadata Sync", overview.get("tables_to_sync_metadata", 0))
     c3.metric("Manual Review", overview.get("manual_review_count", 0))
     c4.metric("Warnings", len(summary_obj.get("preflight_warnings", [])))
-    st.text(render_pre_migration_summary(summary_obj))
+
+    c_overview, c_drift = st.columns(2)
+    with c_overview:
+        st.markdown("### Overview")
+        st.dataframe(_overview_rows(summary_obj), use_container_width=True, hide_index=True)
+    with c_drift:
+        st.markdown("### Drift Summary")
+        st.dataframe(_drift_summary_rows(summary_obj), use_container_width=True, hide_index=True)
+
+    warnings = summary_obj.get("preflight_warnings", [])
+    if warnings:
+        st.markdown("### Preflight Warnings")
+        st.dataframe(_list_rows(warnings, "warning"), use_container_width=True, hide_index=True)
+
+    manual_review = summary_obj.get("manual_review_required", [])
+    if manual_review:
+        st.markdown("### Manual Review Required")
+        st.dataframe(_list_rows(manual_review, "table"), use_container_width=True, hide_index=True)
+
+    destructive_actions = summary_obj.get("destructive_actions", [])
+    if destructive_actions:
+        st.markdown("### Destructive Actions")
+        st.dataframe(
+            _list_rows(destructive_actions, "action"), use_container_width=True, hide_index=True
+        )
+
+    if summary_obj.get("planner_recommendation"):
+        st.info(summary_obj["planner_recommendation"])
+
     recommendations = _table_recommendations(summary_obj)
     if recommendations:
         st.markdown("### Table Recommendations")
@@ -349,11 +579,50 @@ def _render_post_summary_block(summary_obj: dict[str, Any]) -> None:
     execution_overview = summary_obj.get("execution_overview", {})
     verification_summary = summary_obj.get("verification_summary", {})
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Executed", execution_overview.get("steps_executed", 0))
-    c2.metric("Failures", execution_overview.get("step_failures", 0))
+    c1.metric("Completed Steps", execution_overview.get("completed_steps", 0))
+    c2.metric("Failed Steps", execution_overview.get("failed_steps", 0))
     c3.metric("Tables Verified", verification_summary.get("tables_checked", 0))
     c4.metric("Verification OK", "Yes" if verification_summary.get("ok", False) else "No")
-    st.text(render_post_migration_summary(summary_obj))
+
+    c_execution, c_verification = st.columns(2)
+    with c_execution:
+        st.markdown("### Execution Overview")
+        st.dataframe(_post_execution_rows(summary_obj), use_container_width=True, hide_index=True)
+    with c_verification:
+        st.markdown("### Verification Summary")
+        st.dataframe(
+            _post_verification_rows(summary_obj), use_container_width=True, hide_index=True
+        )
+
+    failed_steps = summary_obj.get("failed_steps", [])
+    if failed_steps:
+        st.markdown("### Failed Steps")
+        st.dataframe(_list_rows(failed_steps, "step_id"), use_container_width=True, hide_index=True)
+
+    failed_tables = verification_summary.get("failed_tables", [])
+    if failed_tables:
+        st.markdown("### Failed Tables")
+        st.dataframe(_list_rows(failed_tables, "table"), use_container_width=True, hide_index=True)
+
+    residual_manual_review = summary_obj.get("residual_manual_review", [])
+    if residual_manual_review:
+        st.markdown("### Residual Manual Review")
+        st.dataframe(
+            _list_rows(residual_manual_review, "table"), use_container_width=True, hide_index=True
+        )
+
+    next_actions = summary_obj.get("next_actions", [])
+    if next_actions:
+        st.markdown("### Next Actions")
+        st.dataframe(
+            _list_rows(next_actions, "next_action"), use_container_width=True, hide_index=True
+        )
+
+    notes = summary_obj.get("notes", [])
+    if notes:
+        st.markdown("### Notes")
+        st.dataframe(_list_rows(notes, "note"), use_container_width=True, hide_index=True)
+
     with st.expander("Raw post summary JSON", expanded=False):
         st.json(summary_obj)
 
@@ -467,6 +736,20 @@ def _run(config_path: str, plan_path: str, approval_path: str, state_path: str, 
         summary=summary_obj.model_dump(mode="python"),
         approval=approval_obj.model_dump(mode="python"),
     )
+    if not filtered_plan.get("steps"):
+        included = set(approval_obj.included_tables)
+        excluded = set(approval_obj.excluded_tables)
+        overlap = sorted(included.intersection(excluded))
+        if overlap:
+            raise RuntimeError(
+                "Approval filters removed every plan step because the same tables are both "
+                f"included and excluded: {', '.join(overlap)}. Recreate the approval with "
+                "those tables removed from Excluded tables."
+            )
+        raise RuntimeError(
+            "Approval filters removed every plan step. Recreate the approval with at least "
+            "one copy or metadata-sync table included, or use Analyze/Review only for plan-only mode."
+        )
     execute(cfg=cfg, plan_path=plan_path, state_path=str(state_file), plan_obj=filtered_plan)
     return str(state_file)
 
@@ -523,7 +806,8 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Run Settings")
-        config_path = st.text_input("Config path", value="config.yaml", key="sidebar_config_path")
+        st.caption("Active config file")
+        st.code(st.session_state["active_config_path"], language="text")
         planner = st.selectbox(
             "Planner", options=list(PLANNER_MODULES), index=0, key="sidebar_planner"
         )
@@ -559,9 +843,226 @@ def main() -> None:
     st.markdown("## Workflow Dashboard")
     _render_overview(latest_summary, latest_diff, latest_plan)
 
-    tabs = st.tabs(["Analyze", "Review", "Approve", "Run", "Post Summary", "Artifacts"])
+    workflow_tabs = [
+        "Config",
+        "Analyze",
+        "Review",
+        "Approve",
+        "Run",
+        "Post Summary",
+        "Artifacts",
+    ]
+    selected_tab = st.radio(
+        "Workflow step",
+        options=workflow_tabs,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="active_workflow_tab",
+    )
+    config_path = st.session_state["active_config_path"]
 
-    with tabs[0]:
+    if selected_tab == "Config":
+        st.subheader("Config")
+        st.write(
+            "Create or select the connection config used by Analyze, Run, CLI commands, and MCP tools."
+        )
+
+        st.markdown("### Use Existing Config")
+        existing_config_path = st.text_input(
+            "Existing Config File",
+            value=st.session_state["active_config_path"],
+            key="config_existing_path",
+        )
+        if st.button("Use Existing Config", key="config_use_existing_button"):
+            if Path(existing_config_path).exists():
+                st.session_state["active_config_path"] = existing_config_path
+                st.session_state["flash_message"] = f"Active config set to {existing_config_path}"
+                st.session_state["flash_kind"] = "success"
+                st.rerun()
+            else:
+                st.error(f"Config file does not exist: `{existing_config_path}`")
+
+        st.markdown("### Build Connection Config")
+        st.caption(
+            "PostgreSQL is supported today. The database-type dropdown is the adapter seam "
+            "for adding more engines later without changing the workflow."
+        )
+
+        source_col, target_col = st.columns(2)
+        db_type_options = list(DATABASE_TYPES)
+        with source_col:
+            st.markdown("#### Source Database")
+            source_db_type_label = st.selectbox(
+                "Source Database Type",
+                options=db_type_options,
+                index=0,
+                key="config_source_db_type",
+            )
+            source_host = st.text_input("Source Host", value="localhost", key="config_source_host")
+            source_port = st.number_input(
+                "Source Port",
+                min_value=1,
+                max_value=65535,
+                value=5433,
+                key="config_source_port",
+            )
+            source_database = st.text_input(
+                "Source Database Name", value="sourcedb", key="config_source_database"
+            )
+            source_user = st.text_input("Source User", value="source", key="config_source_user")
+            source_password = st.text_input(
+                "Source Password",
+                value="source",
+                type="password",
+                key="config_source_password",
+            )
+
+        with target_col:
+            st.markdown("#### Target Database")
+            target_db_type_label = st.selectbox(
+                "Target Database Type",
+                options=db_type_options,
+                index=0,
+                key="config_target_db_type",
+            )
+            target_host = st.text_input("Target Host", value="localhost", key="config_target_host")
+            target_port = st.number_input(
+                "Target Port",
+                min_value=1,
+                max_value=65535,
+                value=5434,
+                key="config_target_port",
+            )
+            target_database = st.text_input(
+                "Target Database Name", value="targetdb", key="config_target_database"
+            )
+            target_user = st.text_input("Target User", value="target", key="config_target_user")
+            target_password = st.text_input(
+                "Target Password",
+                value="target",
+                type="password",
+                key="config_target_password",
+            )
+
+        st.markdown("### Migration Defaults")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            config_batch_size = st.number_input(
+                "Batch Size",
+                min_value=1,
+                value=20000,
+                step=1000,
+                key="config_batch_size",
+            )
+            config_max_partitions = st.number_input(
+                "Max Partitions",
+                min_value=1,
+                value=16,
+                step=1,
+                key="config_max_partitions",
+            )
+        with c2:
+            config_allow_destructive = st.checkbox(
+                "Allow Destructive Execution",
+                value=True,
+                key="config_allow_destructive",
+            )
+            config_truncate_first = st.checkbox(
+                "Truncate Target Before Copy",
+                value=True,
+                key="config_truncate_first",
+            )
+        with c3:
+            config_sample_hash = st.checkbox(
+                "Enable Sample Hash Verification",
+                value=False,
+                key="config_sample_hash",
+            )
+            config_maintenance = st.selectbox(
+                "Post-Migration Maintenance",
+                options=["auto", "analyze_only", "vacuum_analyze", "off"],
+                index=0,
+                key="config_maintenance",
+            )
+
+        include_schemas_text = st.text_input(
+            "Include Schemas (comma-separated, blank means all non-system schemas)",
+            value="",
+            key="config_include_schemas",
+        )
+        exclude_schemas_text = st.text_input(
+            "Exclude Schemas (comma-separated)",
+            value="pg_catalog, information_schema",
+            key="config_exclude_schemas",
+        )
+        config_output_path = st.text_input(
+            "Generated Config Output File",
+            value=st.session_state["config_output_path"],
+            key="config_output_path_input",
+        )
+
+        if st.button("Generate Config", type="primary", key="config_generate_button"):
+            required_values = {
+                "Source Host": source_host,
+                "Source Database Name": source_database,
+                "Source User": source_user,
+                "Target Host": target_host,
+                "Target Database Name": target_database,
+                "Target User": target_user,
+            }
+            missing = [label for label, value in required_values.items() if not value.strip()]
+            if missing:
+                st.error("Missing required fields: " + ", ".join(missing))
+                st.stop()
+
+            browser_config = _build_browser_config(
+                source=_database_config(
+                    db_type=DATABASE_TYPES[source_db_type_label],
+                    host=source_host,
+                    port=int(source_port),
+                    database=source_database,
+                    user=source_user,
+                    password=source_password,
+                ),
+                target=_database_config(
+                    db_type=DATABASE_TYPES[target_db_type_label],
+                    host=target_host,
+                    port=int(target_port),
+                    database=target_database,
+                    user=target_user,
+                    password=target_password,
+                ),
+                planner=planner,
+                max_partitions=int(config_max_partitions),
+                batch_size=int(config_batch_size),
+                include_schemas=_split_csv(include_schemas_text),
+                exclude_schemas=_split_csv(exclude_schemas_text),
+                allow_destructive=config_allow_destructive,
+                truncate_first=config_truncate_first,
+                sample_hash=config_sample_hash,
+                maintenance=config_maintenance,
+            )
+            created_path = _write_browser_config(browser_config, config_output_path)
+            st.session_state["active_config_path"] = created_path
+            st.session_state["config_output_path"] = created_path
+            st.session_state["flash_message"] = f"Config written to {created_path}"
+            st.session_state["flash_kind"] = "success"
+            st.rerun()
+
+        if Path(st.session_state["active_config_path"]).exists():
+            with st.expander("Active Config Preview", expanded=False):
+                try:
+                    preview = load_config(st.session_state["active_config_path"])
+                    redacted_preview = {
+                        **preview,
+                        "source": {**preview.get("source", {}), "password": "***"},
+                        "target": {**preview.get("target", {}), "password": "***"},
+                    }
+                    st.json(redacted_preview)
+                except Exception as exc:
+                    st.warning(f"Could not preview config yet: {exc}")
+
+    if selected_tab == "Analyze":
         st.subheader("Analyze")
         st.write(
             "Build source and target manifests, compute drift, generate a plan, and render a pre-migration summary."
@@ -619,7 +1120,7 @@ def main() -> None:
                     Path(st.session_state["last_rationale_path"]).read_text(encoding="utf-8")
                 )
 
-    with tabs[1]:
+    if selected_tab == "Review":
         st.subheader("Review")
         review_summary_path = st.text_input(
             "Summary path", value=st.session_state["last_summary_path"], key="review_summary_path"
@@ -652,7 +1153,7 @@ def main() -> None:
         else:
             st.info("Run Analyze first or enter an existing pre_migration_summary.json path.")
 
-    with tabs[2]:
+    if selected_tab == "Approve":
         st.subheader("Approve")
         plan_path = st.text_input(
             "Plan path", value=st.session_state["last_plan_path"], key="approve_plan_path"
@@ -690,26 +1191,48 @@ def main() -> None:
                 if item.get("action") in ("copy", "sync_metadata")
             ]
             manual_review_options = list(summary_obj.get("manual_review_required", []))
+        approval_scope_key = _safe_key(summary_path or "no-summary")
 
         include_tables = st.multiselect(
             "Included tables",
             options=table_options,
             default=default_include,
-            key="approve_include_tables",
+            key=f"approve_include_tables_{approval_scope_key}",
         )
         exclude_tables = st.multiselect(
-            "Excluded tables", options=table_options, default=[], key="approve_exclude_tables"
+            "Excluded tables",
+            options=table_options,
+            default=[],
+            key=f"approve_exclude_tables_{approval_scope_key}",
         )
         approve_manual_review_items = st.multiselect(
             "Approved manual-review items",
             options=manual_review_options,
             default=[],
-            key="approve_manual_review_items",
+            key=f"approve_manual_review_items_{approval_scope_key}",
         )
         allow_destructive = st.checkbox(
             "Allow destructive actions", value=False, key="approve_allow_destructive"
         )
         notes = st.text_area("Approval notes", value="", key="approve_notes")
+        overlapping_tables = _approval_overlap(include_tables, exclude_tables)
+        if overlapping_tables:
+            st.error(
+                "Tables cannot be both included and excluded. Remove these from Excluded "
+                f"tables before creating approval: {', '.join(overlapping_tables)}"
+            )
+        if summary_obj and not overlapping_tables:
+            approved_candidates = _approved_table_candidates(
+                summary_obj=summary_obj,
+                include_tables=include_tables,
+                exclude_tables=exclude_tables,
+                approved_manual_review_items=approve_manual_review_items,
+                allow_destructive=allow_destructive,
+                approved_mode=mode,
+            )
+            st.caption(
+                f"Executable table candidates after approval filters: {len(approved_candidates)}"
+            )
 
         if st.button("Create Approval", key="approve_create_button"):
             inputs_ok = all(
@@ -723,6 +1246,22 @@ def main() -> None:
                 ]
             )
             if not inputs_ok:
+                st.stop()
+            if overlapping_tables:
+                st.stop()
+            approved_candidates = _approved_table_candidates(
+                summary_obj=summary_obj or {},
+                include_tables=include_tables,
+                exclude_tables=exclude_tables,
+                approved_manual_review_items=approve_manual_review_items,
+                allow_destructive=allow_destructive,
+                approved_mode=mode,
+            )
+            if not approved_candidates and mode != "plan_only":
+                st.error(
+                    "Approval would create an executable plan with 0 tables. Include at least "
+                    "one copy or metadata-sync table before creating approval."
+                )
                 st.stop()
             try:
                 created_path, stdout, stderr = _capture(
@@ -745,7 +1284,7 @@ def main() -> None:
             except Exception as exc:
                 st.exception(exc)
 
-    with tabs[3]:
+    if selected_tab == "Run":
         st.subheader("Run")
         run_plan_path = st.text_input(
             "Plan path ", value=st.session_state["last_plan_path"], key="run_plan_path"
@@ -798,7 +1337,7 @@ def main() -> None:
             st.markdown("### Latest Execution Summary")
             _render_state_block(latest_state)
 
-    with tabs[4]:
+    if selected_tab == "Post Summary":
         st.subheader("Post-Migration Summary")
         post_plan_path = st.text_input(
             "Migration Plan File", value=st.session_state["last_plan_path"], key="post_plan_path"
@@ -902,21 +1441,26 @@ def main() -> None:
             ):
                 st.json(failure_obj)
 
-    with tabs[5]:
+    if selected_tab == "Artifacts":
         st.subheader("Artifacts")
         artifact_rows = [
+            {
+                "artifact": "Active Config File",
+                "path": st.session_state["active_config_path"] or "-",
+                "exists": _artifact_exists(st.session_state["active_config_path"]),
+            },
             {
                 "artifact": "Analysis Directory",
                 "path": st.session_state["analysis_dir"],
                 "exists": Path(st.session_state["analysis_dir"]).exists(),
             },
             {
-                "artifact": "Plan",
+                "artifact": "Migration Plan File",
                 "path": st.session_state["last_plan_path"] or "-",
                 "exists": _artifact_exists(st.session_state["last_plan_path"]),
             },
             {
-                "artifact": "Pre-Migration Summary",
+                "artifact": "Pre-Migration Summary File",
                 "path": st.session_state["last_summary_path"] or "-",
                 "exists": _artifact_exists(st.session_state["last_summary_path"]),
             },
@@ -936,22 +1480,22 @@ def main() -> None:
                 "exists": _artifact_exists(st.session_state["last_rationale_path"]),
             },
             {
-                "artifact": "Approval",
+                "artifact": "Approval File",
                 "path": st.session_state["last_approval_path"] or "-",
                 "exists": _artifact_exists(st.session_state["last_approval_path"]),
             },
             {
-                "artifact": "Run State",
+                "artifact": "Run State File",
                 "path": st.session_state["last_state_path"] or "-",
                 "exists": _artifact_exists(st.session_state["last_state_path"]),
             },
             {
-                "artifact": "Post Summary",
+                "artifact": "Post-Migration Summary Output File",
                 "path": st.session_state["last_post_summary_path"] or "-",
                 "exists": _artifact_exists(st.session_state["last_post_summary_path"]),
             },
             {
-                "artifact": "Failure Analysis",
+                "artifact": "Failure Analysis File",
                 "path": st.session_state["last_failure_analysis_path"] or "-",
                 "exists": _artifact_exists(st.session_state["last_failure_analysis_path"]),
             },
