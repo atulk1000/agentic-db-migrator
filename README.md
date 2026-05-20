@@ -24,6 +24,17 @@ flowchart LR
     I --> J["Post-Migration Summary"]
 ```
 
+## Reviewer Path
+
+For a quick review, start with:
+
+1. [`examples/approval_workflow`](examples/approval_workflow) for the deterministic audit trail
+2. [`examples/llm_run`](examples/llm_run) for the model-output, repair, validation, and approval chain
+3. [`src/amo/core/planners/openai.py`](src/amo/core/planners/openai.py) and [`src/amo/core/planners/gemini.py`](src/amo/core/planners/gemini.py) for live planner adapters
+4. [`src/amo/core/planners/llm_common.py`](src/amo/core/planners/llm_common.py) for shared normalization, repair, and validation
+5. [`evals/cases`](evals/cases) for planner edge cases
+6. `python evals/run_planner_eval.py --planner heuristic` for the checked-in local eval path
+
 ## Why This Repo Is Interesting
 
 This is not just a one-shot table-copy script. The repo is moving toward a complete PostgreSQL environment migration workflow, including data, schema objects, dependency-sensitive ordering, and post-run validation. It already includes the pieces you would expect from a more serious migration platform:
@@ -206,6 +217,14 @@ The eval report tracks:
 - materialized-view staging behavior
 
 Saved eval cases live in [`evals/cases`](evals/cases), and the latest checked-in example report is [`evals/latest_eval_report.json`](evals/latest_eval_report.json). The current checked-in heuristic suite covers 10 cases across partitioned tables, metadata drift, foreign keys, indexes, grants, UDFs, materialized views, PostGIS metadata, and large-table transfer hints.
+
+Latest checked-in planner snapshot:
+
+| Planner | Cases | Schema Pass | Fallbacks | Forbidden Ops | Coverage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| heuristic | 10 | 10/10 | 0 | 0 | 10/10 |
+| openai | API-keyed live run | Run with `OPENAI_API_KEY` | Reported by eval output | Reported by eval output | Reported by eval output |
+| gemini | API-keyed live run | Run with `GEMINI_API_KEY` | Reported by eval output | Reported by eval output | Reported by eval output |
 
 ## Safety Boundary
 
