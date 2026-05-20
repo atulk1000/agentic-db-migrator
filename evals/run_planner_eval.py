@@ -68,9 +68,19 @@ def _run_case(planner_name: str, case_path: Path) -> dict[str, Any]:
     ops = {step.get("op") for step in steps}
     tables = {_table_key(step) for step in steps if _table_key(step)}
     forbidden_ops = sorted(op for op in expected.get("must_not_use_ops", []) if op in ops)
+    missing_required_ops = sorted(
+        op for op in expected.get("must_include_ops", []) if op not in ops
+    )
     missing_required_tables = sorted(
         table for table in expected.get("must_include_tables", []) if table not in tables
     )
+
+    missing_table_ops: list[str] = []
+    for table, required_ops in expected.get("must_include_table_ops", {}).items():
+        table_ops = {step.get("op") for step in steps if _table_key(step) == table}
+        for op in required_ops:
+            if op not in table_ops:
+                missing_table_ops.append(f"{table}:{op}")
 
     sample_hash_missing: list[str] = []
     for table in expected.get("requires_sample_hash_for", []):
@@ -88,12 +98,55 @@ def _run_case(planner_name: str, case_path: Path) -> dict[str, Any]:
         if not any((step.get("validate") or {}).get("partition_fidelity") for step in matching):
             partition_fidelity_missing.append(table)
 
+    transfer_expectation_failures: list[str] = []
+    for rule in expected.get("requires_transfer_for", []):
+        table = rule["table"]
+        matching = [
+            step for step in steps if _table_key(step) == table and step.get("op") == "copy_table"
+        ]
+        if not matching:
+            transfer_expectation_failures.append(f"{table}:copy_table")
+            continue
+        transfer = matching[0].get("transfer") or {}
+        for field, expected_value in rule.items():
+            if field == "table":
+                continue
+            if transfer.get(field) != expected_value:
+                transfer_expectation_failures.append(f"{table}:{field}")
+
+    matview_strategy_missing: list[str] = []
+    for rule in expected.get("requires_matview_strategy_for", []):
+        expected_schema = rule["schema"]
+        expected_name = rule["name"]
+        expected_strategy = rule["strategy"]
+        found = False
+        for step in steps:
+            if step.get("schema") != expected_schema:
+                continue
+            for matview in step.get("matviews", []):
+                if (
+                    matview.get("name") == expected_name
+                    and matview.get("strategy") == expected_strategy
+                ):
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            matview_strategy_missing.append(
+                f"{expected_schema}.{expected_name}:{expected_strategy}"
+            )
+
     passed = (
         validation_passed
         and not forbidden_ops
+        and not missing_required_ops
         and not missing_required_tables
+        and not missing_table_ops
         and not sample_hash_missing
         and not partition_fidelity_missing
+        and not transfer_expectation_failures
+        and not matview_strategy_missing
     )
 
     return {
@@ -106,9 +159,13 @@ def _run_case(planner_name: str, case_path: Path) -> dict[str, Any]:
         "elapsed_ms": elapsed_ms,
         "step_count": len(steps),
         "forbidden_ops": forbidden_ops,
+        "missing_required_ops": missing_required_ops,
         "missing_required_tables": missing_required_tables,
+        "missing_table_ops": missing_table_ops,
         "sample_hash_missing": sample_hash_missing,
         "partition_fidelity_missing": partition_fidelity_missing,
+        "transfer_expectation_failures": transfer_expectation_failures,
+        "matview_strategy_missing": matview_strategy_missing,
         "error": error,
     }
 

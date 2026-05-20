@@ -1,0 +1,89 @@
+{
+  "description": "A table with secondary and clustered indexes should recreate indexes after copying.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "public"
+    ],
+    "tables": [
+      {
+        "schema": "public",
+        "table": "accounts",
+        "estimated_rows": 10000,
+        "estimated_bytes": 1200000,
+        "primary_key": [
+          "account_id"
+        ],
+        "columns": [
+          {
+            "name": "account_id",
+            "type_sql": "integer",
+            "udt_name": "int4",
+            "not_null": true
+          },
+          {
+            "name": "created_at",
+            "type_sql": "timestamp without time zone",
+            "udt_name": "timestamp"
+          }
+        ],
+        "indexes": [
+          {
+            "index_name": "idx_accounts_created_at",
+            "index_definition": "CREATE INDEX idx_accounts_created_at ON public.accounts USING btree (created_at)",
+            "cluster_statement": "CLUSTER public.accounts USING idx_accounts_created_at"
+          }
+        ]
+      }
+    ],
+    "matviews": [],
+    "matview_indexes": [],
+    "schema_grants": {},
+    "udfs": [],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 0,
+      "missing_in_target": 1,
+      "metadata_match": 0,
+      "metadata_diff": 0,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "public",
+        "table": "accounts",
+        "status": "missing_in_target",
+        "structure_compatible": true
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_table_ops": {
+      "public.accounts": [
+        "copy_table",
+        "create_indexes",
+        "verify_table"
+      ]
+    },
+    "requires_sample_hash_for": [
+      "public.accounts"
+    ],
+    "requires_transfer_for": [
+      {
+        "table": "public.accounts",
+        "engine": "copy",
+        "chunk_column": "created_at"
+      }
+    ]
+  }
+}

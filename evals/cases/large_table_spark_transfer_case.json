@@ -1,0 +1,79 @@
+{
+  "description": "A multi-million-row table should plan Spark JDBC transfer hints and vacuum/analyze maintenance.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "analytics"
+    ],
+    "tables": [
+      {
+        "schema": "analytics",
+        "table": "fact_events",
+        "estimated_rows": 2500000,
+        "estimated_bytes": 900000000,
+        "primary_key": [
+          "event_id"
+        ],
+        "columns": [
+          {
+            "name": "event_id",
+            "type_sql": "bigint",
+            "udt_name": "int8",
+            "not_null": true
+          },
+          {
+            "name": "event_ts",
+            "type_sql": "timestamp without time zone",
+            "udt_name": "timestamp"
+          }
+        ]
+      }
+    ],
+    "matviews": [],
+    "matview_indexes": [],
+    "schema_grants": {},
+    "udfs": [],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 0,
+      "missing_in_target": 1,
+      "metadata_match": 0,
+      "metadata_diff": 0,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "analytics",
+        "table": "fact_events",
+        "status": "missing_in_target",
+        "structure_compatible": true
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_table_ops": {
+      "analytics.fact_events": [
+        "copy_table",
+        "vacuum_analyze_table",
+        "verify_table"
+      ]
+    },
+    "requires_transfer_for": [
+      {
+        "table": "analytics.fact_events",
+        "engine": "spark_jdbc",
+        "chunk_column": "event_ts"
+      }
+    ]
+  }
+}

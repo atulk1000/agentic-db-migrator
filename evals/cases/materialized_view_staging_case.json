@@ -1,0 +1,107 @@
+{
+  "description": "A large materialized view should be staged, rebuilt, indexed, and grant replayed.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "analytics"
+    ],
+    "tables": [
+      {
+        "schema": "analytics",
+        "table": "events",
+        "estimated_rows": 1200000,
+        "estimated_bytes": 450000000,
+        "primary_key": [
+          "event_id"
+        ],
+        "columns": [
+          {
+            "name": "event_id",
+            "type_sql": "bigint",
+            "udt_name": "int8",
+            "not_null": true
+          },
+          {
+            "name": "event_type",
+            "type_sql": "text",
+            "udt_name": "text"
+          }
+        ]
+      }
+    ],
+    "matviews": [
+      {
+        "schema": "analytics",
+        "name": "event_counts_mv",
+        "definition": "SELECT event_type, count(*) AS event_count FROM analytics.events GROUP BY event_type",
+        "estimated_rows": 500000,
+        "estimated_bytes": 125000000,
+        "has_geometry": false,
+        "geometry_columns": [],
+        "grants": [
+          {
+            "grantee": "report_user",
+            "privilege_type": "SELECT",
+            "object_type": "relation",
+            "schema": "analytics",
+            "object_name": "event_counts_mv"
+          }
+        ]
+      }
+    ],
+    "matview_indexes": [
+      {
+        "schema": "analytics",
+        "matview": "event_counts_mv",
+        "index_name": "idx_event_counts_type",
+        "index_definition": "CREATE INDEX idx_event_counts_type ON analytics.event_counts_mv USING btree (event_type)"
+      }
+    ],
+    "schema_grants": {},
+    "udfs": [],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 0,
+      "missing_in_target": 1,
+      "metadata_match": 0,
+      "metadata_diff": 0,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "analytics",
+        "table": "events",
+        "status": "missing_in_target",
+        "structure_compatible": true
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_ops": [
+      "stage_matviews",
+      "create_matviews",
+      "create_mv_indexes",
+      "apply_grants"
+    ],
+    "must_include_tables": [
+      "analytics.events"
+    ],
+    "requires_matview_strategy_for": [
+      {
+        "schema": "analytics",
+        "name": "event_counts_mv",
+        "strategy": "staged_rebuild"
+      }
+    ]
+  }
+}

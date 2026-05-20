@@ -199,10 +199,13 @@ The eval report tracks:
 - fallback count
 - forbidden operation usage
 - required table coverage
+- required planner operation coverage
 - required verification behavior
+- transfer-hint behavior for large, chunked, and geometry-heavy tables
 - partition-fidelity behavior
+- materialized-view staging behavior
 
-Saved eval cases live in [`evals/cases`](evals/cases), and the latest checked-in example report is [`evals/latest_eval_report.json`](evals/latest_eval_report.json).
+Saved eval cases live in [`evals/cases`](evals/cases), and the latest checked-in example report is [`evals/latest_eval_report.json`](evals/latest_eval_report.json). The current checked-in heuristic suite covers 10 cases across partitioned tables, metadata drift, foreign keys, indexes, grants, UDFs, materialized views, PostGIS metadata, and large-table transfer hints.
 
 ## Safety Boundary
 
@@ -547,13 +550,13 @@ What is strong today:
 - structured artifacts and summaries
 - live Gemini planner path when configured with `GEMINI_API_KEY`
 - live OpenAI planner path when configured with `OPENAI_API_KEY`
-- planner eval scaffolding and checked-in LLM artifacts
+- 10-case planner eval suite and checked-in LLM artifacts
 
 What is still evolving:
 
 - `spark_jdbc` support is scaffolded but not yet battle-hardened
 - Streamlit is a lightweight workflow dashboard, not a polished product UI
-- the eval suite is intentionally small and should grow with more migration edge cases
+- the eval suite should keep growing with deeper destructive-policy, failure-recovery, and multi-schema dependency cases
 
 ## Testing
 
@@ -563,7 +566,7 @@ Run the local checks with:
 python -m compileall src tests
 python -m pytest -q
 python evals/run_planner_eval.py --planner heuristic
-python evals/run_planner_eval.py --planner openai
+python evals/run_planner_eval.py --planner openai  # optional; requires OPENAI_API_KEY
 ```
 
 Format and lint before publishing:

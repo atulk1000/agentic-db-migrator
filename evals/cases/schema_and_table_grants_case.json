@@ -1,0 +1,95 @@
+{
+  "description": "Schema-level and relation-level grants should be replayed through allowlisted grant steps.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "secure"
+    ],
+    "schema_grants": {
+      "secure": [
+        {
+          "grantee": "app_user",
+          "privilege_type": "USAGE",
+          "object_type": "schema",
+          "schema": "secure"
+        }
+      ]
+    },
+    "tables": [
+      {
+        "schema": "secure",
+        "table": "audit_events",
+        "estimated_rows": 15000,
+        "estimated_bytes": 2000000,
+        "primary_key": [
+          "event_id"
+        ],
+        "columns": [
+          {
+            "name": "event_id",
+            "type_sql": "integer",
+            "udt_name": "int4",
+            "not_null": true
+          },
+          {
+            "name": "created_at",
+            "type_sql": "timestamp without time zone",
+            "udt_name": "timestamp"
+          }
+        ],
+        "grants": [
+          {
+            "grantee": "auditor",
+            "privilege_type": "SELECT",
+            "object_type": "relation",
+            "schema": "secure",
+            "object_name": "audit_events"
+          }
+        ]
+      }
+    ],
+    "matviews": [],
+    "matview_indexes": [],
+    "udfs": [],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 0,
+      "missing_in_target": 1,
+      "metadata_match": 0,
+      "metadata_diff": 0,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "secure",
+        "table": "audit_events",
+        "status": "missing_in_target",
+        "structure_compatible": true
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_ops": [
+      "apply_grants"
+    ],
+    "must_include_table_ops": {
+      "secure.audit_events": [
+        "copy_table",
+        "verify_table"
+      ]
+    },
+    "requires_sample_hash_for": [
+      "secure.audit_events"
+    ]
+  }
+}

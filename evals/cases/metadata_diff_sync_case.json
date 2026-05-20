@@ -1,0 +1,94 @@
+{
+  "description": "A metadata-drift table should still be planned through the validated copy and verification path.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "billing"
+    ],
+    "tables": [
+      {
+        "schema": "billing",
+        "table": "invoices",
+        "estimated_rows": 80000,
+        "estimated_bytes": 16000000,
+        "primary_key": [
+          "invoice_id"
+        ],
+        "columns": [
+          {
+            "name": "invoice_id",
+            "type_sql": "integer",
+            "udt_name": "int4",
+            "not_null": true
+          },
+          {
+            "name": "updated_at",
+            "type_sql": "timestamp without time zone",
+            "udt_name": "timestamp"
+          },
+          {
+            "name": "status",
+            "type_sql": "text",
+            "udt_name": "text"
+          }
+        ]
+      }
+    ],
+    "matviews": [],
+    "matview_indexes": [],
+    "schema_grants": {},
+    "udfs": [],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 1,
+      "missing_in_target": 0,
+      "metadata_match": 0,
+      "metadata_diff": 1,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "billing",
+        "table": "invoices",
+        "status": "metadata_diff",
+        "structure_compatible": false,
+        "differences": [
+          "column status missing in target"
+        ]
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_table_ops": {
+      "billing.invoices": [
+        "ensure_table",
+        "copy_table",
+        "verify_table"
+      ]
+    },
+    "must_not_use_ops": [
+      "drop_table",
+      "execute_sql"
+    ],
+    "requires_sample_hash_for": [
+      "billing.invoices"
+    ],
+    "requires_transfer_for": [
+      {
+        "table": "billing.invoices",
+        "engine": "copy",
+        "chunk_column": "updated_at"
+      }
+    ]
+  }
+}

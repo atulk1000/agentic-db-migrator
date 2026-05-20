@@ -1,0 +1,90 @@
+{
+  "description": "A PostGIS-heavy table should preserve geometry metadata and use native geometry copy hints.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "gis"
+    ],
+    "tables": [
+      {
+        "schema": "gis",
+        "table": "parcels",
+        "estimated_rows": 45000,
+        "estimated_bytes": 9000000,
+        "primary_key": [
+          "parcel_id"
+        ],
+        "has_geometry": true,
+        "geometry_columns": [
+          "geom"
+        ],
+        "columns": [
+          {
+            "name": "parcel_id",
+            "type_sql": "integer",
+            "udt_name": "int4",
+            "not_null": true
+          },
+          {
+            "name": "geom",
+            "type_sql": "geometry(MultiPolygon, 4326)",
+            "udt_name": "geometry",
+            "geometry_type": "MULTIPOLYGON",
+            "geometry_srid": 4326
+          }
+        ]
+      }
+    ],
+    "matviews": [],
+    "matview_indexes": [],
+    "schema_grants": {},
+    "udfs": [],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 0,
+      "missing_in_target": 1,
+      "metadata_match": 0,
+      "metadata_diff": 0,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "gis",
+        "table": "parcels",
+        "status": "missing_in_target",
+        "structure_compatible": true
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_tables": [
+      "gis.parcels"
+    ],
+    "must_include_table_ops": {
+      "gis.parcels": [
+        "copy_table",
+        "verify_table"
+      ]
+    },
+    "requires_transfer_for": [
+      {
+        "table": "gis.parcels",
+        "engine": "copy",
+        "geometry_mode": "postgis_native_copy"
+      }
+    ],
+    "requires_sample_hash_for": [
+      "gis.parcels"
+    ]
+  }
+}

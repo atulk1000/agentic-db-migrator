@@ -1,0 +1,78 @@
+{
+  "description": "A schema with UDF metadata should emit a create_udfs step before table work.",
+  "manifest": {
+    "version": "v2",
+    "generated_at": "2026-05-20T00:00:00+00:00",
+    "source": {
+      "database": "sourcedb",
+      "host": "source-db",
+      "port": 5432
+    },
+    "include_schemas": [
+      "analytics"
+    ],
+    "tables": [
+      {
+        "schema": "analytics",
+        "table": "metrics",
+        "estimated_rows": 1000,
+        "estimated_bytes": 100000,
+        "primary_key": [
+          "metric_id"
+        ],
+        "columns": [
+          {
+            "name": "metric_id",
+            "type_sql": "integer",
+            "udt_name": "int4",
+            "not_null": true
+          }
+        ]
+      }
+    ],
+    "matviews": [],
+    "matview_indexes": [],
+    "schema_grants": {},
+    "udfs": [
+      {
+        "schema": "analytics",
+        "name": "normalize_metric_name(text)",
+        "create_statement": "CREATE FUNCTION analytics.normalize_metric_name(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT lower(trim(value)) $$"
+      }
+    ],
+    "errors": []
+  },
+  "manifest_diff": {
+    "summary": {
+      "source_tables": 1,
+      "target_tables": 0,
+      "missing_in_target": 1,
+      "metadata_match": 0,
+      "metadata_diff": 0,
+      "missing_in_source": 0
+    },
+    "tables": [
+      {
+        "schema": "analytics",
+        "table": "metrics",
+        "status": "missing_in_target",
+        "structure_compatible": true
+      }
+    ],
+    "warnings": []
+  },
+  "expected": {
+    "must_include_ops": [
+      "create_udfs"
+    ],
+    "must_include_table_ops": {
+      "analytics.metrics": [
+        "copy_table",
+        "verify_table"
+      ]
+    },
+    "requires_sample_hash_for": [
+      "analytics.metrics"
+    ]
+  }
+}
