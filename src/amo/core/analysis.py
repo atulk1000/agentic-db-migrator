@@ -11,6 +11,7 @@ from amo.core.manifest_builder import build_manifest
 from amo.core.planners.models import ManifestTable, MigrationManifest, validate_plan_document
 from amo.core.workflow_models import (
     ApprovalDocument,
+    KeyReadinessStatus,
     ManifestDiffDocument,
     ManifestDiffSummary,
     MigrationMode,
@@ -23,6 +24,7 @@ from amo.core.workflow_models import (
     TableAction,
     TableDiffEntry,
     TableRecommendation,
+    TableStrategy,
     TransferStrategy,
     VerificationDepth,
 )
@@ -358,8 +360,28 @@ def _recommend_action(mode: MigrationMode, diff_entry: TableDiffEntry) -> TableA
     return "manual_review"
 
 
+def _determine_key_readiness(
+    source_table: ManifestTable, target_table: ManifestTable | None
+) -> tuple[KeyReadinessStatus, list[str], bool]:
+    source_pk = list(source_table.primary_key)
+    target_pk = list(target_table.primary_key) if target_table else []
+
+    if source_pk and target_pk and source_pk == target_pk:
+        return "primary_key", source_pk, True
+    if source_pk and not target_pk:
+        return "source_only_key", source_pk, False
+    if target_pk and not source_pk:
+        return "target_only_key", target_pk, False
+    if source_pk and target_pk and source_pk != target_pk:
+        return "ambiguous_key", [], False
+    return "no_key", [], False
+
+
 def _build_recommendation(
-    table: ManifestTable, diff_entry: TableDiffEntry, mode: MigrationMode
+    table: ManifestTable,
+    diff_entry: TableDiffEntry,
+    mode: MigrationMode,
+    target_table: ManifestTable | None = None,
 ) -> TableRecommendation:
     chunk_column = _choose_chunk_column(table)
     chunk_count = _determine_chunk_count(table, chunk_column)
@@ -367,6 +389,7 @@ def _build_recommendation(
     risk_score, risk_reasons = _score_risk(table, diff_entry, chunk_column)
     action = _recommend_action(mode, diff_entry)
     verification_depth = _choose_verification_depth(table, risk_score)
+    key_readiness, conflict_key, upsert_eligible = _determine_key_readiness(table, target_table)
     warnings = list(risk_reasons)
 
     manual_review_required = action == "manual_review"
@@ -401,6 +424,9 @@ def _build_recommendation(
         warnings=warnings,
         manual_review_required=manual_review_required,
         rationale=", ".join(rationale_bits),
+        key_readiness=key_readiness,
+        conflict_key=conflict_key,
+        upsert_eligible=upsert_eligible,
     )
 
 
@@ -412,12 +438,17 @@ def build_pre_migration_summary(
     migration_mode: MigrationMode = "safe_sync",
 ) -> dict[str, Any]:
     source = MigrationManifest.model_validate(source_manifest)
+    target = MigrationManifest.model_validate(target_manifest)
     diff = ManifestDiffDocument.model_validate(manifest_diff)
 
     diff_map = {_table_key(item.schema_name, item.table): item for item in diff.tables}
+    target_map = {_table_key(table.schema_name, table.table): table for table in target.tables}
     recommendations = [
         _build_recommendation(
-            table, diff_map[_table_key(table.schema_name, table.table)], migration_mode
+            table,
+            diff_map[_table_key(table.schema_name, table.table)],
+            migration_mode,
+            target_map.get(_table_key(table.schema_name, table.table)),
         )
         for table in _root_tables(source)
         if _table_key(table.schema_name, table.table) in diff_map
@@ -501,6 +532,34 @@ def render_pre_migration_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _normalize_table_strategies(
+    raw_strategies: dict[str, Any] | None,
+    summary: PreMigrationSummary,
+) -> dict[str, TableStrategy]:
+    if not raw_strategies:
+        return {}
+
+    recommendation_map = {
+        _table_key(item.schema_name, item.table): item for item in summary.table_recommendations
+    }
+    normalized: dict[str, TableStrategy] = {}
+    for table_key, raw in raw_strategies.items():
+        if table_key not in recommendation_map:
+            raise ValueError(f"Strategy references unknown table: {table_key}")
+
+        strategy_obj = raw if isinstance(raw, TableStrategy) else TableStrategy.model_validate(raw)
+        recommendation = recommendation_map[table_key]
+
+        if strategy_obj.strategy == "upsert" and not strategy_obj.conflict_key:
+            strategy_obj = strategy_obj.model_copy(
+                update={"conflict_key": list(recommendation.conflict_key)}
+            )
+
+        normalized[table_key] = strategy_obj
+
+    return normalized
+
+
 def build_approval_document(
     plan_path: str | Path,
     summary_path: str | Path,
@@ -510,9 +569,11 @@ def build_approval_document(
     include_tables: Iterable[str] | None = None,
     exclude_tables: Iterable[str] | None = None,
     approved_manual_review_items: Iterable[str] | None = None,
+    table_strategies: dict[str, Any] | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
     summary = load_pre_summary(summary_path)
+    normalized_strategies = _normalize_table_strategies(table_strategies, summary)
 
     default_included = [
         _table_key(item.schema_name, item.table)
@@ -533,6 +594,7 @@ def build_approval_document(
         included_tables=include_list,
         excluded_tables=exclude_list,
         approved_manual_review_items=sorted(set(approved_manual_review_items or [])),
+        table_strategies=normalized_strategies,
         notes=notes,
     )
     return approval.model_dump(mode="python", by_alias=True)
@@ -553,6 +615,7 @@ def filter_plan_for_approval(
     included_tables = set(approval_doc.included_tables)
     excluded_tables = set(approval_doc.excluded_tables)
     approved_manual = set(approval_doc.approved_manual_review_items)
+    table_strategies = approval_doc.table_strategies
 
     approved_actions: dict[str, str] = {}
     for key, recommendation in recommendation_map.items():
@@ -565,6 +628,8 @@ def filter_plan_for_approval(
                 approved_actions[key] = "copy"
             continue
         if approval_doc.approved_mode == "plan_only":
+            continue
+        if table_strategies.get(key, TableStrategy(strategy="append_only")).strategy == "skip":
             continue
         approved_actions[key] = recommendation.action
 
@@ -634,9 +699,23 @@ def filter_plan_for_approval(
             continue
 
         action = approved_actions[table_key]
+        table_strategy = table_strategies.get(table_key)
         if op == "ensure_table" and table_key in partition_parent_keys:
             active_partition_parent = table_key
         if action == "sync_metadata" and op not in ("ensure_table", "create_indexes"):
+            continue
+
+        if table_strategy and op == "copy_table":
+            updated_step = dict(step)
+            transfer = dict(updated_step.get("transfer") or {})
+            transfer["load_strategy"] = table_strategy.strategy
+            if table_strategy.conflict_key:
+                transfer["conflict_key"] = list(table_strategy.conflict_key)
+            updated_step["transfer"] = transfer
+            if table_strategy.strategy == "upsert":
+                updated_step["op"] = "upsert_table"
+                updated_step["conflict_key"] = list(table_strategy.conflict_key)
+            filtered_steps.append(updated_step)
             continue
 
         filtered_steps.append(step)
@@ -646,8 +725,431 @@ def filter_plan_for_approval(
     filtered_plan["approval"] = {
         "approved_mode": approval_doc.approved_mode,
         "approved_tables": sorted(approved_actions),
+        "table_strategies": {
+            key: strategy.model_dump(mode="python")
+            for key, strategy in approval_doc.table_strategies.items()
+            if key in approved_actions
+        },
     }
     return filtered_plan
+
+
+def _strategy_for_table(approval_doc: ApprovalDocument, table_key: str) -> TableStrategy | None:
+    return approval_doc.table_strategies.get(table_key)
+
+
+def validate_approval_strategies(
+    summary: dict[str, Any],
+    approval: dict[str, Any],
+) -> list[dict[str, Any]]:
+    summary_doc = PreMigrationSummary.model_validate(summary)
+    approval_doc = ApprovalDocument.model_validate(approval)
+    recommendation_map = {
+        _table_key(item.schema_name, item.table): item for item in summary_doc.table_recommendations
+    }
+    included_tables = set(approval_doc.included_tables)
+    excluded_tables = set(approval_doc.excluded_tables)
+    errors: list[dict[str, Any]] = []
+
+    for table_key, table_strategy in approval_doc.table_strategies.items():
+        recommendation = recommendation_map.get(table_key)
+        if not recommendation:
+            errors.append(
+                {
+                    "table": table_key,
+                    "strategy": table_strategy.strategy,
+                    "reason": "strategy references a table that is not in the pre-migration summary",
+                }
+            )
+            continue
+        if table_key in excluded_tables:
+            errors.append(
+                {
+                    "table": table_key,
+                    "strategy": table_strategy.strategy,
+                    "reason": "excluded tables cannot also declare an execution strategy",
+                }
+            )
+        if table_key not in included_tables and table_strategy.strategy != "skip":
+            errors.append(
+                {
+                    "table": table_key,
+                    "strategy": table_strategy.strategy,
+                    "reason": "strategy table is not included in the approval scope",
+                }
+            )
+        if table_strategy.strategy == "upsert":
+            if not table_strategy.conflict_key:
+                errors.append(
+                    {
+                        "table": table_key,
+                        "strategy": table_strategy.strategy,
+                        "reason": "upsert requires a conflict key",
+                    }
+                )
+            elif not recommendation.upsert_eligible:
+                errors.append(
+                    {
+                        "table": table_key,
+                        "strategy": table_strategy.strategy,
+                        "reason": f"table is not upsert-ready: {recommendation.key_readiness}",
+                    }
+                )
+            elif list(table_strategy.conflict_key) != list(recommendation.conflict_key):
+                errors.append(
+                    {
+                        "table": table_key,
+                        "strategy": table_strategy.strategy,
+                        "reason": "upsert conflict key must match the validated primary key",
+                    }
+                )
+        if table_strategy.strategy == "truncate_reload" and not approval_doc.allow_destructive:
+            errors.append(
+                {
+                    "table": table_key,
+                    "strategy": table_strategy.strategy,
+                    "reason": "truncate_reload requires allow_destructive=true in approval",
+                }
+            )
+
+    return errors
+
+
+def build_dry_run_preview(
+    plan: dict[str, Any],
+    summary: dict[str, Any],
+    approval: dict[str, Any],
+) -> dict[str, Any]:
+    strategy_errors = validate_approval_strategies(summary, approval)
+    if strategy_errors:
+        return {
+            "ok": False,
+            "blocked": strategy_errors,
+            "approved_tables": [],
+            "steps": [],
+            "destructive_actions": [],
+        }
+
+    filtered_plan = filter_plan_for_approval(plan=plan, summary=summary, approval=approval)
+    approval_doc = ApprovalDocument.model_validate(approval)
+    summary_doc = PreMigrationSummary.model_validate(summary)
+    recommendation_map = {
+        _table_key(item.schema_name, item.table): item for item in summary_doc.table_recommendations
+    }
+
+    approved_tables: list[dict[str, Any]] = []
+    for table_key in filtered_plan.get("approval", {}).get("approved_tables", []):
+        recommendation = recommendation_map.get(table_key)
+        table_strategy = _strategy_for_table(approval_doc, table_key)
+        strategy = table_strategy.strategy if table_strategy else "config_default"
+        conflict_key = table_strategy.conflict_key if table_strategy else []
+        approved_tables.append(
+            {
+                "table": table_key,
+                "action": recommendation.action if recommendation else None,
+                "strategy": strategy,
+                "conflict_key": conflict_key,
+                "key_readiness": recommendation.key_readiness if recommendation else None,
+            }
+        )
+
+    step_rows = [
+        {
+            "id": step.get("id"),
+            "op": step.get("op"),
+            "schema": step.get("schema"),
+            "table": step.get("table"),
+            "strategy": (step.get("transfer") or {}).get("load_strategy"),
+            "conflict_key": step.get("conflict_key")
+            or (step.get("transfer") or {}).get("conflict_key", []),
+        }
+        for step in filtered_plan.get("steps", [])
+    ]
+    destructive_actions = [
+        item["table"] for item in approved_tables if item.get("strategy") == "truncate_reload"
+    ]
+
+    ok = bool(step_rows) or approval_doc.approved_mode == "plan_only"
+    return {
+        "ok": ok,
+        "blocked": (
+            []
+            if ok
+            else [
+                {
+                    "reason": "filtered approval produced no executable steps",
+                    "approved_mode": approval_doc.approved_mode,
+                }
+            ]
+        ),
+        "approved_mode": approval_doc.approved_mode,
+        "approved_tables": approved_tables,
+        "destructive_actions": destructive_actions,
+        "step_count": len(step_rows),
+        "steps": step_rows,
+        "filtered_plan": filtered_plan,
+    }
+
+
+def render_dry_run_preview(preview: dict[str, Any]) -> str:
+    lines = [
+        "Dry-Run Preview",
+        f"Status: {'ready' if preview.get('ok') else 'blocked'}",
+        f"Approved mode: {preview.get('approved_mode', '-')}",
+        f"Step count: {preview.get('step_count', 0)}",
+        "",
+        "Approved Tables:",
+    ]
+    for item in preview.get("approved_tables", []):
+        key = item.get("table")
+        strategy = item.get("strategy")
+        conflict_key = ",".join(item.get("conflict_key") or []) or "-"
+        lines.append(f"- {key}: strategy={strategy}, conflict_key={conflict_key}")
+    if not preview.get("approved_tables"):
+        lines.append("- none")
+
+    destructive = preview.get("destructive_actions") or []
+    lines.extend(["", "Destructive Actions:"])
+    if destructive:
+        for table in destructive:
+            lines.append(f"- {table}: truncate_reload")
+    else:
+        lines.append("- none")
+
+    blocked = preview.get("blocked") or []
+    lines.extend(["", "Blocked Items:"])
+    if blocked:
+        for item in blocked:
+            lines.append(f"- {item.get('table', '-')}: {item.get('reason', 'blocked')}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "Execution Steps:"])
+    for step in preview.get("steps", []):
+        table = (
+            _table_key(step["schema"], step["table"]) if step.get("table") else step.get("schema")
+        )
+        strategy = step.get("strategy") or "-"
+        lines.append(f"- {step.get('id')}: {step.get('op')} {table} strategy={strategy}")
+    if not preview.get("steps"):
+        lines.append("- none")
+
+    return "\n".join(lines)
+
+
+def _step_table_key(step: dict[str, Any]) -> str | None:
+    schema = step.get("schema")
+    table = step.get("table")
+    if schema and table:
+        return _table_key(schema, table)
+    return None
+
+
+def build_execution_graph(plan: dict[str, Any]) -> dict[str, Any]:
+    plan_for_validation = dict(plan)
+    plan_for_validation.pop("approval", None)
+    plan_for_validation.pop("retry", None)
+    plan_obj = validate_plan_document(plan_for_validation)
+    steps = plan_obj.get("steps", [])
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
+    schema_nodes: dict[str, str] = {}
+    table_ddl_nodes: dict[str, str] = {}
+    table_data_nodes: dict[str, str] = {}
+
+    def add_edge(source: str | None, target: str | None, reason: str) -> None:
+        if not source or not target or source == target:
+            return
+        key = (source, target, reason)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        edges.append({"from": source, "to": target, "reason": reason})
+
+    for index, step in enumerate(steps):
+        step_id = step.get("id") or f"step_{index + 1:04d}"
+        op = step.get("op")
+        schema = step.get("schema")
+        table = step.get("table")
+        table_key = _step_table_key(step)
+        nodes.append(
+            {
+                "id": step_id,
+                "index": index,
+                "op": op,
+                "schema": schema,
+                "table": table,
+                "table_key": table_key,
+                "group": table_key or schema or "global",
+            }
+        )
+
+        if index > 0:
+            previous_id = steps[index - 1].get("id") or f"step_{index:04d}"
+            add_edge(previous_id, step_id, "execution_order")
+
+        if op == "ensure_schema" and schema:
+            schema_nodes[schema] = step_id
+            continue
+
+        if schema:
+            add_edge(schema_nodes.get(schema), step_id, "schema_exists")
+
+        if op == "ensure_table" and table_key:
+            table_ddl_nodes[table_key] = step_id
+            continue
+
+        if table_key and op in ("copy_table", "upsert_table"):
+            add_edge(table_ddl_nodes.get(table_key), step_id, "table_exists")
+            table_data_nodes[table_key] = step_id
+            continue
+
+        if table_key and op in (
+            "sync_sequences",
+            "create_indexes",
+            "verify_table",
+            "analyze_table",
+            "vacuum_analyze_table",
+        ):
+            add_edge(table_data_nodes.get(table_key), step_id, "data_loaded")
+
+        if op == "add_fks":
+            for fk in step.get("fks", []):
+                add_edge(
+                    table_data_nodes.get(_table_key(fk.get("schema", schema), fk.get("table", ""))),
+                    step_id,
+                    "referenced_table_loaded",
+                )
+
+        if op == "apply_grants" and schema:
+            for table_key_for_schema, data_step_id in table_data_nodes.items():
+                if table_key_for_schema.startswith(f"{schema}."):
+                    add_edge(data_step_id, step_id, "schema_objects_ready")
+
+    return {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def render_execution_graph(graph: dict[str, Any]) -> str:
+    lines = [
+        "Execution Graph",
+        f"Nodes: {graph.get('node_count', 0)}",
+        f"Edges: {graph.get('edge_count', 0)}",
+        "",
+        "Nodes:",
+    ]
+    for node in graph.get("nodes", []):
+        target = node.get("table_key") or node.get("schema") or "-"
+        lines.append(f"- {node.get('id')}: {node.get('op')} {target}")
+
+    lines.extend(["", "Edges:"])
+    if graph.get("edges"):
+        for edge in graph.get("edges", []):
+            lines.append(f"- {edge.get('from')} -> {edge.get('to')}: {edge.get('reason')}")
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines)
+
+
+def build_retry_plan(
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    mode: str = "failed_only",
+    table: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    plan_for_validation = dict(plan)
+    plan_for_validation.pop("approval", None)
+    plan_for_validation.pop("retry", None)
+    plan_obj = validate_plan_document(plan_for_validation)
+    steps = plan_obj.get("steps", [])
+    completed = state.get("completed", {})
+    failed_step_ids = [
+        step_id for step_id, payload in completed.items() if not payload.get("ok", False)
+    ]
+    step_index = {
+        step.get("id") or f"step_{index + 1:04d}": index for index, step in enumerate(steps)
+    }
+    failed_indexes = [step_index[step_id] for step_id in failed_step_ids if step_id in step_index]
+    selected_indexes: set[int] = set()
+    selected_reason = ""
+
+    if mode not in ("failed_only", "from_failed_step", "table"):
+        raise ValueError("retry mode must be failed_only, from_failed_step, or table")
+
+    if mode == "from_failed_step":
+        if failed_indexes:
+            first_failed = min(failed_indexes)
+            selected_indexes = set(range(first_failed, len(steps)))
+            selected_reason = f"from first failed step index {first_failed}"
+    elif mode == "table":
+        if not table:
+            raise ValueError("table retry mode requires a schema-qualified table")
+        selected_indexes = {
+            index for index, step in enumerate(steps) if _step_table_key(step) == table
+        }
+        selected_reason = f"all steps for {table}"
+    else:
+        failed_tables = {
+            _step_table_key(steps[index])
+            for index in failed_indexes
+            if _step_table_key(steps[index])
+        }
+        failed_tables.discard(None)
+        for failed_table in failed_tables:
+            table_indexes = [
+                index for index, step in enumerate(steps) if _step_table_key(step) == failed_table
+            ]
+            failed_for_table = [
+                index for index in failed_indexes if _step_table_key(steps[index]) == failed_table
+            ]
+            if failed_for_table:
+                first_failed_for_table = min(failed_for_table)
+                selected_indexes.update(
+                    index for index in table_indexes if index >= first_failed_for_table
+                )
+        selected_reason = f"failed tables from failed step onward: {sorted(failed_tables)}"
+
+    selected_schemas = {
+        steps[index].get("schema") for index in selected_indexes if steps[index].get("schema")
+    }
+    selected_tables = {
+        _step_table_key(steps[index]) for index in selected_indexes if _step_table_key(steps[index])
+    }
+    for index, step in enumerate(steps):
+        if step.get("op") == "ensure_schema" and step.get("schema") in selected_schemas:
+            selected_indexes.add(index)
+        if step.get("op") == "ensure_table" and _step_table_key(step) in selected_tables:
+            selected_indexes.add(index)
+
+    retry_steps = [step for index, step in enumerate(steps) if index in selected_indexes]
+    retry_plan = dict(plan_obj)
+    if "approval" in plan:
+        retry_plan["approval"] = plan["approval"]
+    retry_plan["steps"] = retry_steps
+    retry_plan["retry"] = {
+        "mode": mode,
+        "table": table,
+        "source_failed_steps": failed_step_ids,
+        "reason": selected_reason,
+    }
+    summary = {
+        "mode": mode,
+        "table": table,
+        "source_failed_steps": failed_step_ids,
+        "retry_step_count": len(retry_steps),
+        "retry_step_ids": [step.get("id") for step in retry_steps],
+        "reason": selected_reason,
+        "ok": bool(retry_steps),
+    }
+    if not retry_steps:
+        summary["blocked_reason"] = "No retryable steps matched the requested retry mode."
+    return retry_plan, summary
 
 
 def build_post_migration_summary(
@@ -669,14 +1171,22 @@ def build_post_migration_summary(
         success=not failed_steps and bool((report or {}).get("ok", True)),
     )
 
+    inline_verify_results = [
+        payload.get("verify")
+        for payload in completed.values()
+        if isinstance(payload, dict) and payload.get("verify")
+    ]
+    report_results = (report or {}).get("results", [])
+    verification_results = report_results or inline_verify_results
     failed_tables = [
         _table_key(item.get("schema", ""), item.get("table", ""))
-        for item in (report or {}).get("results", [])
+        for item in verification_results
         if not item.get("ok", False)
     ]
+    tables_checked = int(report.get("tables_checked", 0)) if report else len(verification_results)
     verification = PostMigrationVerificationOverview(
         ok=bool((report or {}).get("ok", not failed_tables)),
-        tables_checked=int((report or {}).get("tables_checked", 0)),
+        tables_checked=tables_checked,
         failed_tables=failed_tables,
     )
 

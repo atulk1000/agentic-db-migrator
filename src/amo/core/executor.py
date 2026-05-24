@@ -52,6 +52,56 @@ def _write_json(path: str | Path, obj: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(obj, indent=2, sort_keys=True))
 
 
+def classify_failure(exc: Exception) -> dict[str, Any]:
+    message = str(exc)
+    pgcode = getattr(exc, "pgcode", None)
+    lowered = message.lower()
+
+    failure_class = "unknown_error"
+    retryable = False
+    if pgcode in ("23505",) or "duplicate conflict keys" in lowered:
+        failure_class = "duplicate_key"
+        retryable = True
+    elif pgcode in ("23503",) or "foreign key" in lowered:
+        failure_class = "foreign_key_violation"
+        retryable = True
+    elif pgcode in ("42501",) or "permission denied" in lowered:
+        failure_class = "permission_error"
+    elif "refusing to truncate" in lowered or "destructive" in lowered:
+        failure_class = "destructive_policy_denied"
+    elif "verification failed" in lowered:
+        failure_class = "verification_mismatch"
+        retryable = True
+    elif "does not exist" in lowered or "schema" in lowered or "column" in lowered:
+        failure_class = "schema_mismatch"
+    elif "timeout" in lowered or "out of memory" in lowered or "disk" in lowered:
+        failure_class = "timeout_or_resource_error"
+        retryable = True
+    elif isinstance(exc, psycopg2.OperationalError):
+        failure_class = "connection_error"
+        retryable = True
+
+    return {
+        "failure_class": failure_class,
+        "retryable": retryable,
+        "recommended_next_action": _recommended_action_for_failure(failure_class),
+    }
+
+
+def _recommended_action_for_failure(failure_class: str) -> str:
+    actions = {
+        "connection_error": "Check source and target connectivity before retrying.",
+        "permission_error": "Grant the required schema/table permissions and retry.",
+        "schema_mismatch": "Compare source and target table metadata before retrying.",
+        "duplicate_key": "Inspect duplicate conflict keys before retrying the upsert.",
+        "foreign_key_violation": "Check parent table ordering and referential data completeness.",
+        "destructive_policy_denied": "Recreate approval with destructive permission or choose a non-destructive strategy.",
+        "verification_mismatch": "Inspect rowcount or sample-hash mismatches before cutover.",
+        "timeout_or_resource_error": "Increase resources, reduce chunk size, or retry the failed table.",
+    }
+    return actions.get(failure_class, "Inspect the error context before retrying.")
+
+
 def _ensure_idle(conn) -> None:
     """
     Ensure connection is not inside a transaction.
@@ -148,10 +198,27 @@ class MigrationOrchestrator:
         self.ensure_schema(schema)
         self.ensure_table_like_source(schema, table)
         transfer = transfer or {}
+        load_strategy = transfer.get("load_strategy")
         if self.engine_type == "spark_jdbc":
             self._copy_table_spark_jdbc(schema, table, transfer=transfer)
             return
-        self._copy_table_psycopg2(schema, table)
+        self._copy_table_psycopg2(schema, table, load_strategy=load_strategy)
+
+    def upsert_table(
+        self,
+        schema: str,
+        table: str,
+        conflict_key: list[str],
+        transfer: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Copy source rows into a target-side staging table, then merge by conflict key.
+        """
+        if not conflict_key:
+            raise RuntimeError(f"Upsert for {schema}.{table} requires a conflict key")
+        self.ensure_schema(schema)
+        self.ensure_table_like_source(schema, table)
+        self._upsert_table_psycopg2(schema, table, conflict_key)
 
     def set_session_settings(self, conn) -> None:
         """
@@ -274,6 +341,36 @@ class MigrationOrchestrator:
             (schema, table),
         )
         return [r[0] for r in rows]
+
+    def _fetch_table_columns_for_copy(self, conn, schema: str, table: str) -> list[dict[str, Any]]:
+        rows = self._fetch(
+            conn,
+            """
+            SELECT
+                a.attname AS col_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_sql,
+                a.attidentity AS attidentity,
+                a.attgenerated AS attgenerated
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """,
+            (schema, table),
+        )
+        return [
+            {
+                "name": name,
+                "type_sql": type_sql,
+                "attidentity": attidentity or "",
+                "attgenerated": attgenerated or "",
+            }
+            for name, type_sql, attidentity, attgenerated in rows
+        ]
 
     def _fetch_source_partition_parent(
         self, src_conn, schema: str, table: str
@@ -458,8 +555,18 @@ class MigrationOrchestrator:
             self._put_src(src)
             self._put_tgt(tgt)
 
-    def _copy_table_psycopg2(self, schema: str, table: str) -> None:
-        if self.truncate_first and not self.allow_destructive:
+    def _should_truncate_for_strategy(self, load_strategy: str | None) -> bool:
+        if load_strategy == "append_only":
+            return False
+        if load_strategy == "truncate_reload":
+            return True
+        return self.truncate_first
+
+    def _copy_table_psycopg2(
+        self, schema: str, table: str, load_strategy: str | None = None
+    ) -> None:
+        truncate_first = self._should_truncate_for_strategy(load_strategy)
+        if truncate_first and not self.allow_destructive:
             raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
 
         src = self._src()
@@ -472,7 +579,7 @@ class MigrationOrchestrator:
             self.set_session_settings(tgt)
 
             with tgt.cursor() as cur:
-                if self.truncate_first:
+                if truncate_first:
                     cur.execute(sql.SQL("TRUNCATE TABLE {} CASCADE").format(_fq(schema, table)))
 
             copy_out = f'COPY (SELECT * FROM "{schema}"."{table}") TO STDOUT WITH (FORMAT CSV)'
@@ -501,9 +608,149 @@ class MigrationOrchestrator:
             self._put_src(src)
             self._put_tgt(tgt)
 
+    def _upsert_table_psycopg2(self, schema: str, table: str, conflict_key: list[str]) -> None:
+        src = self._src()
+        tgt = self._tgt()
+        staging_table = f"amo_stage_{schema}_{table}_{int(time.time() * 1000)}"
+        try:
+            src.autocommit = True
+            tgt.autocommit = False
+            self.set_session_settings(src)
+            self.set_session_settings(tgt)
+
+            source_columns = self._fetch_table_columns_for_copy(src, schema, table)
+            target_columns = self._fetch_table_columns_for_copy(tgt, schema, table)
+            target_by_name = {column["name"]: column for column in target_columns}
+            source_by_name = {column["name"]: column for column in source_columns}
+
+            missing_keys = [column for column in conflict_key if column not in target_by_name]
+            if missing_keys:
+                raise RuntimeError(
+                    f"Upsert conflict key missing from target {schema}.{table}: {missing_keys}"
+                )
+            missing_source_keys = [
+                column for column in conflict_key if column not in source_by_name
+            ]
+            if missing_source_keys:
+                raise RuntimeError(
+                    f"Upsert conflict key missing from source {schema}.{table}: {missing_source_keys}"
+                )
+
+            copy_columns = [
+                column["name"]
+                for column in target_columns
+                if column["name"] in source_by_name and not column.get("attgenerated")
+            ]
+            if not copy_columns:
+                raise RuntimeError(f"Upsert for {schema}.{table} has no copyable columns")
+
+            missing_copy_keys = [column for column in conflict_key if column not in copy_columns]
+            if missing_copy_keys:
+                raise RuntimeError(
+                    f"Upsert conflict key cannot be copied for {schema}.{table}: {missing_copy_keys}"
+                )
+
+            column_defs = [
+                sql.SQL("{} {}").format(
+                    sql.Identifier(column),
+                    sql.SQL(target_by_name[column]["type_sql"]),
+                )
+                for column in copy_columns
+            ]
+            column_idents = [sql.Identifier(column) for column in copy_columns]
+            conflict_idents = [sql.Identifier(column) for column in conflict_key]
+            update_columns = [
+                column
+                for column in copy_columns
+                if column not in conflict_key
+                and not target_by_name[column].get("attidentity")
+                and not target_by_name[column].get("attgenerated")
+            ]
+
+            with tgt.cursor() as cur:
+                cur.execute(
+                    sql.SQL("CREATE TEMP TABLE {} ({}) ON COMMIT DROP").format(
+                        sql.Identifier(staging_table),
+                        sql.SQL(", ").join(column_defs),
+                    )
+                )
+
+            copy_out_sql = sql.SQL("COPY (SELECT {} FROM {}) TO STDOUT WITH (FORMAT CSV)").format(
+                sql.SQL(", ").join(column_idents),
+                _fq(schema, table),
+            )
+            copy_in_sql = sql.SQL("COPY {} ({}) FROM STDIN WITH (FORMAT CSV)").format(
+                sql.Identifier(staging_table),
+                sql.SQL(", ").join(column_idents),
+            )
+            with src.cursor() as src_cur, tgt.cursor() as tgt_cur:
+                with tempfile.NamedTemporaryFile(
+                    mode="w+b",
+                    suffix=f"__upsert__{schema}__{table}.csv",
+                    dir=self.spool_dir,
+                ) as f:
+                    src_cur.copy_expert(copy_out_sql.as_string(src), f)
+                    f.seek(0)
+                    tgt_cur.copy_expert(copy_in_sql.as_string(tgt), f)
+
+            duplicate_sql = sql.SQL(
+                "SELECT 1 FROM {} GROUP BY {} HAVING COUNT(*) > 1 LIMIT 1"
+            ).format(
+                sql.Identifier(staging_table),
+                sql.SQL(", ").join(conflict_idents),
+            )
+            with tgt.cursor() as cur:
+                cur.execute(duplicate_sql)
+                if cur.fetchone():
+                    raise RuntimeError(
+                        f"Duplicate conflict keys found in staging for {schema}.{table}"
+                    )
+
+            insert_prefix = sql.SQL("INSERT INTO {} ({})").format(
+                _fq(schema, table),
+                sql.SQL(", ").join(column_idents),
+            )
+            if any(target_by_name[column].get("attidentity") == "a" for column in copy_columns):
+                insert_prefix = sql.SQL("{} OVERRIDING SYSTEM VALUE").format(insert_prefix)
+
+            if update_columns:
+                assignments = [
+                    sql.SQL("{} = EXCLUDED.{}").format(
+                        sql.Identifier(column),
+                        sql.Identifier(column),
+                    )
+                    for column in update_columns
+                ]
+                conflict_action = sql.SQL("DO UPDATE SET {}").format(
+                    sql.SQL(", ").join(assignments)
+                )
+            else:
+                conflict_action = sql.SQL("DO NOTHING")
+
+            merge_sql = sql.SQL("{} SELECT {} FROM {} ON CONFLICT ({}) {}").format(
+                insert_prefix,
+                sql.SQL(", ").join(column_idents),
+                sql.Identifier(staging_table),
+                sql.SQL(", ").join(conflict_idents),
+                conflict_action,
+            )
+            with tgt.cursor() as cur:
+                cur.execute(merge_sql)
+
+            tgt.commit()
+        except Exception:
+            try:
+                tgt.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            self._put_src(src)
+            self._put_tgt(tgt)
+
     def _copy_table_spark_jdbc(self, schema: str, table: str, transfer: dict[str, Any]) -> None:
         if transfer.get("geometry_mode") not in (None, "default") or transfer.get("has_geometry"):
-            self._copy_table_psycopg2(schema, table)
+            self._copy_table_psycopg2(schema, table, load_strategy=transfer.get("load_strategy"))
             return
 
         try:
@@ -535,7 +782,8 @@ class MigrationOrchestrator:
                     except Exception:
                         chunk_column = None
 
-            if self.truncate_first:
+            truncate_first = self._should_truncate_for_strategy(transfer.get("load_strategy"))
+            if truncate_first:
                 if not self.allow_destructive:
                     raise RuntimeError("Refusing to TRUNCATE without engine.allow_destructive=true")
                 with tgt_conn.cursor() as cur:
@@ -1055,12 +1303,12 @@ def execute(
         for step in steps:
             step_id = step.get("id") or f"{step.get('schema')}.{step.get('table')}.{step.get('op')}"
             if step_id in completed:
-                print(f"↩️  Skipping {step_id}")
+                print(f"SKIP {step_id}")
                 continue
 
             op = step.get("op")
             t0 = time.time()
-            print(f"➡️  {op} ... {step.get('schema','')}.{step.get('table','')}".strip())
+            print(f"RUN {op} ... {step.get('schema','')}.{step.get('table','')}".strip())
 
             try:
                 if op == "ensure_schema":
@@ -1075,6 +1323,16 @@ def execute(
                 elif op == "copy_table":
                     orch.copy_table(
                         step["schema"], step["table"], transfer=step.get("transfer", {}) or {}
+                    )
+
+                elif op == "upsert_table":
+                    transfer = step.get("transfer", {}) or {}
+                    conflict_key = step.get("conflict_key") or transfer.get("conflict_key") or []
+                    orch.upsert_table(
+                        step["schema"],
+                        step["table"],
+                        conflict_key=list(conflict_key),
+                        transfer=transfer,
                     )
 
                 elif op == "sync_sequences":
@@ -1118,20 +1376,27 @@ def execute(
                         step_id,
                         {"ok": True, "elapsed_s": round(time.time() - t0, 3), "verify": rep},
                     )
-                    print(f"✅ {op} OK in {round(time.time()-t0,3)}s")
+                    print(f"OK {op} in {round(time.time()-t0,3)}s")
                     continue
 
                 else:
                     raise RuntimeError(f"Unknown op: {op}")
 
                 mark(step_id, {"ok": True, "elapsed_s": round(time.time() - t0, 3)})
-                print(f"✅ {op} OK in {round(time.time()-t0,3)}s")
+                print(f"OK {op} in {round(time.time()-t0,3)}s")
 
             except Exception as e:
+                failure = classify_failure(e)
                 mark(
-                    step_id, {"ok": False, "elapsed_s": round(time.time() - t0, 3), "error": str(e)}
+                    step_id,
+                    {
+                        "ok": False,
+                        "elapsed_s": round(time.time() - t0, 3),
+                        "error": str(e),
+                        **failure,
+                    },
                 )
-                print(f"❌ {op} failed: {e}")
+                print(f"FAIL {op}: {e}")
                 raise
 
     finally:

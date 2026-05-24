@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from amo.core.analysis import (
     build_approval_document,
+    build_dry_run_preview,
+    build_execution_graph,
+    build_post_migration_summary,
     build_pre_migration_summary,
+    build_retry_plan,
     diff_manifests,
     filter_plan_for_approval,
+    render_dry_run_preview,
+    render_execution_graph,
     write_json,
 )
 
@@ -235,6 +241,9 @@ def test_diff_and_pre_summary_surface_transfer_strategy_and_manual_review():
     assert events["chunk_column"] == "event_ts"
     assert events["chunk_count"] > 1
     assert events["concurrency_hint"] == 4
+    assert recs[("public", "users")]["key_readiness"] == "primary_key"
+    assert recs[("public", "users")]["conflict_key"] == ["id"]
+    assert recs[("public", "users")]["upsert_eligible"] is True
 
 
 def test_filter_plan_for_approval_keeps_only_approved_tables(tmp_path):
@@ -462,3 +471,211 @@ def test_build_approval_document_uses_schema_name_for_default_includes(tmp_path)
     )
 
     assert approval["included_tables"] == ["analytics.events", "demo.users"]
+
+
+def test_table_strategy_upsert_rewrites_copy_step_and_defaults_conflict_key(tmp_path):
+    int_col = {
+        "name": "id",
+        "type_sql": "integer",
+        "udt_name": "int4",
+        "not_null": True,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
+    source_manifest = _manifest(
+        [_table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=["id"])]
+    )
+    target_manifest = _manifest(
+        [_table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=["id"])]
+    )
+    manifest_diff = diff_manifests(source_manifest, target_manifest)
+    pre_summary = build_pre_migration_summary(
+        source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync"
+    )
+    summary_path = tmp_path / "summary.json"
+    plan_path = tmp_path / "plan.json"
+    write_json(summary_path, pre_summary)
+    write_json(plan_path, _plan())
+
+    approval = build_approval_document(
+        plan_path=plan_path,
+        summary_path=summary_path,
+        approved_mode="safe_sync",
+        include_tables=["public.users"],
+        table_strategies={"public.users": {"strategy": "upsert"}},
+    )
+
+    assert approval["table_strategies"]["public.users"]["conflict_key"] == ["id"]
+
+    filtered = filter_plan_for_approval(_plan(), pre_summary, approval)
+    upsert_steps = [step for step in filtered["steps"] if step.get("op") == "upsert_table"]
+    assert len(upsert_steps) == 1
+    assert upsert_steps[0]["conflict_key"] == ["id"]
+    assert upsert_steps[0]["transfer"]["load_strategy"] == "upsert"
+
+
+def test_dry_run_blocks_upsert_without_safe_key(tmp_path):
+    int_col = {
+        "name": "id",
+        "type_sql": "integer",
+        "udt_name": "int4",
+        "not_null": True,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
+    source_manifest = _manifest(
+        [_table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=[])]
+    )
+    target_manifest = _manifest(
+        [_table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=[])]
+    )
+    manifest_diff = diff_manifests(source_manifest, target_manifest)
+    pre_summary = build_pre_migration_summary(
+        source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync"
+    )
+    summary_path = tmp_path / "summary.json"
+    plan_path = tmp_path / "plan.json"
+    write_json(summary_path, pre_summary)
+    write_json(plan_path, _plan())
+    approval = build_approval_document(
+        plan_path=plan_path,
+        summary_path=summary_path,
+        approved_mode="safe_sync",
+        include_tables=["public.users"],
+        table_strategies={"public.users": {"strategy": "upsert", "conflict_key": ["id"]}},
+    )
+
+    preview = build_dry_run_preview(_plan(), pre_summary, approval)
+    assert preview["ok"] is False
+    assert preview["blocked"][0]["reason"] == "table is not upsert-ready: no_key"
+    assert "blocked" in render_dry_run_preview(preview)
+
+
+def test_dry_run_blocks_truncate_reload_without_destructive_approval(tmp_path):
+    int_col = {
+        "name": "id",
+        "type_sql": "integer",
+        "udt_name": "int4",
+        "not_null": True,
+        "attidentity": "",
+        "default_sql": None,
+        "nextval_sequences": [],
+    }
+    source_manifest = _manifest(
+        [_table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=["id"])]
+    )
+    target_manifest = _manifest(
+        [_table("public", "users", estimated_rows=1000, columns=[int_col], primary_key=["id"])]
+    )
+    manifest_diff = diff_manifests(source_manifest, target_manifest)
+    pre_summary = build_pre_migration_summary(
+        source_manifest, target_manifest, manifest_diff, _plan(), migration_mode="safe_sync"
+    )
+    summary_path = tmp_path / "summary.json"
+    plan_path = tmp_path / "plan.json"
+    write_json(summary_path, pre_summary)
+    write_json(plan_path, _plan())
+    approval = build_approval_document(
+        plan_path=plan_path,
+        summary_path=summary_path,
+        approved_mode="safe_sync",
+        include_tables=["public.users"],
+        table_strategies={"public.users": {"strategy": "truncate_reload"}},
+    )
+
+    preview = build_dry_run_preview(_plan(), pre_summary, approval)
+    assert preview["ok"] is False
+    assert (
+        preview["blocked"][0]["reason"]
+        == "truncate_reload requires allow_destructive=true in approval"
+    )
+
+
+def test_execution_graph_tracks_schema_table_and_data_dependencies():
+    graph = build_execution_graph(_plan())
+
+    assert graph["node_count"] == len(_plan()["steps"])
+    assert any(
+        edge["from"] == "step_0002"
+        and edge["to"] == "step_0007"
+        and edge["reason"] == "schema_exists"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["from"] == "step_0007"
+        and edge["to"] == "step_0008"
+        and edge["reason"] == "table_exists"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["from"] == "step_0008"
+        and edge["to"] == "step_0009"
+        and edge["reason"] == "data_loaded"
+        for edge in graph["edges"]
+    )
+    assert "Execution Graph" in render_execution_graph(graph)
+
+
+def test_build_retry_plan_failed_only_includes_prerequisites_and_failed_table_tail():
+    state = {
+        "completed": {
+            "step_0001": {"ok": True},
+            "step_0002": {"ok": True},
+            "step_0007": {"ok": True},
+            "step_0008": {"ok": False, "failure_class": "duplicate_key"},
+        }
+    }
+
+    retry_plan, summary = build_retry_plan(_plan(), state, mode="failed_only")
+    retry_ids = [step["id"] for step in retry_plan["steps"]]
+
+    assert summary["ok"] is True
+    assert "step_0002" in retry_ids
+    assert "step_0007" in retry_ids
+    assert "step_0008" in retry_ids
+    assert "step_0009" in retry_ids
+    assert "step_0010" in retry_ids
+    assert "step_0004" not in retry_ids
+
+
+def test_post_summary_counts_inline_verify_results_when_report_is_absent():
+    plan = {
+        "steps": [
+            {"id": "step_0001", "op": "copy_table", "schema": "public", "table": "users"},
+            {"id": "step_0002", "op": "verify_table", "schema": "public", "table": "users"},
+            {"id": "step_0003", "op": "verify_table", "schema": "public", "table": "orders"},
+        ]
+    }
+    state = {
+        "completed": {
+            "step_0001": {"ok": True},
+            "step_0002": {
+                "ok": True,
+                "verify": {
+                    "ok": True,
+                    "schema": "public",
+                    "table": "users",
+                    "source_rows": 2,
+                    "target_rows": 2,
+                },
+            },
+            "step_0003": {
+                "ok": True,
+                "verify": {
+                    "ok": True,
+                    "schema": "public",
+                    "table": "orders",
+                    "source_rows": 3,
+                    "target_rows": 3,
+                },
+            },
+        }
+    }
+
+    summary = build_post_migration_summary(plan=plan, state=state)
+
+    assert summary["verification_summary"]["ok"] is True
+    assert summary["verification_summary"]["tables_checked"] == 2
+    assert summary["verification_summary"]["failed_tables"] == []

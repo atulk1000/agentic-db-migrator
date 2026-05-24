@@ -168,11 +168,34 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
             "safe_sync",
             "--include-table",
             "public.users",
+            "--table-strategy",
+            "public.users=upsert",
             "--exclude-table",
             "public.orders",
         ],
     )
     assert approve_result.exit_code == 0, approve_result.output
+    approval_obj = json.loads(approval_path.read_text())
+    assert approval_obj["table_strategies"]["public.users"]["strategy"] == "upsert"
+    assert approval_obj["table_strategies"]["public.users"]["conflict_key"] == ["id"]
+
+    dry_run_result = RUNNER.invoke(
+        cli.app,
+        [
+            "dry-run",
+            "--plan",
+            str(plan_path),
+            "--approval",
+            str(approval_path),
+            "--out",
+            str(out_dir / "dry_run_preview.json"),
+        ],
+    )
+    assert dry_run_result.exit_code == 0, dry_run_result.output
+    assert (out_dir / "dry_run_preview.json").exists()
+    assert (out_dir / "dry_run_preview.md").exists()
+    assert (out_dir / "execution_graph.json").exists()
+    assert (out_dir / "execution_graph.md").exists()
 
     captured = {}
 
@@ -216,6 +239,49 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
         step.get("table") for step in captured["plan_obj"]["steps"] if step.get("table")
     }
     assert filtered_tables == {"users"}
+    assert any(step.get("op") == "upsert_table" for step in captured["plan_obj"]["steps"])
+
+    failed_state_path = out_dir / "failed_state.json"
+    failed_state_path.write_text(
+        json.dumps(
+            {
+                "completed": {
+                    "step_0001": {"ok": True},
+                    "step_0002": {"ok": True},
+                    "step_0003": {"ok": False, "failure_class": "duplicate_key"},
+                }
+            }
+        )
+    )
+    retry_state_path = out_dir / "retry_state.json"
+    retry_result = RUNNER.invoke(
+        cli.app,
+        [
+            "retry",
+            "--config",
+            "config.yaml",
+            "--plan",
+            str(plan_path),
+            "--approval",
+            str(approval_path),
+            "--state",
+            str(failed_state_path),
+            "--retry-state",
+            str(retry_state_path),
+            "--out-dir",
+            str(out_dir),
+        ],
+    )
+    assert retry_result.exit_code == 0, retry_result.output
+    assert (out_dir / "retry_plan.json").exists()
+    assert (out_dir / "retry_summary.json").exists()
+    retry_plan = json.loads((out_dir / "retry_plan.json").read_text())
+    assert [step["id"] for step in retry_plan["steps"]] == [
+        "step_0001",
+        "step_0002",
+        "step_0003",
+        "step_0004",
+    ]
 
     report_path = out_dir / "report.json"
     report_path.write_text(

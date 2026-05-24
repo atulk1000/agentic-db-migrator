@@ -128,6 +128,7 @@ PlanOp = Literal[
     "create_udfs",
     "ensure_table",
     "copy_table",
+    "upsert_table",
     "sync_sequences",
     "create_indexes",
     "add_fks",
@@ -153,6 +154,7 @@ class PlanStep(BaseModel):
     has_geometry: bool = False
     geometry_columns: list[str] = Field(default_factory=list)
     primary_key: list[str] = Field(default_factory=list)
+    conflict_key: list[str] = Field(default_factory=list)
     validation: dict[str, Any] = Field(default_factory=dict, alias="validate")
     indexes: list[IndexInfo] = Field(default_factory=list)
     fks: list[dict[str, Any]] = Field(default_factory=list)
@@ -167,6 +169,7 @@ class PlanStep(BaseModel):
         table_required_ops = {
             "ensure_table",
             "copy_table",
+            "upsert_table",
             "sync_sequences",
             "create_indexes",
             "verify_table",

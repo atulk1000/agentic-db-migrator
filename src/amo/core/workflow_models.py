@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MigrationMode = Literal[
     "full_refresh",
@@ -25,6 +25,22 @@ TableAction = Literal[
     "sync_metadata",
     "manual_review",
     "skip",
+]
+
+LoadStrategy = Literal[
+    "append_only",
+    "upsert",
+    "truncate_reload",
+    "skip",
+]
+
+KeyReadinessStatus = Literal[
+    "primary_key",
+    "matching_unique_key",
+    "source_only_key",
+    "target_only_key",
+    "no_key",
+    "ambiguous_key",
 ]
 
 TransferStrategy = Literal[
@@ -90,6 +106,9 @@ class TableRecommendation(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     manual_review_required: bool = False
     rationale: str = ""
+    key_readiness: KeyReadinessStatus = "no_key"
+    conflict_key: list[str] = Field(default_factory=list)
+    upsert_eligible: bool = False
 
 
 class PreMigrationOverview(BaseModel):
@@ -113,6 +132,18 @@ class PreMigrationSummary(BaseModel):
     planner_recommendation: str = ""
 
 
+class TableStrategy(BaseModel):
+    strategy: LoadStrategy
+    conflict_key: list[str] = Field(default_factory=list)
+    staging_schema: str | None = None
+    preserve_target_only_columns: bool = True
+
+    @field_validator("conflict_key")
+    @classmethod
+    def reject_empty_conflict_key_parts(cls, value: list[str]) -> list[str]:
+        return [part for part in value if part]
+
+
 class ApprovalDocument(BaseModel):
     approved_mode: MigrationMode
     approved_at: str
@@ -123,6 +154,7 @@ class ApprovalDocument(BaseModel):
     included_tables: list[str] = Field(default_factory=list)
     excluded_tables: list[str] = Field(default_factory=list)
     approved_manual_review_items: list[str] = Field(default_factory=list)
+    table_strategies: dict[str, TableStrategy] = Field(default_factory=dict)
     notes: str | None = None
 
 

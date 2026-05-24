@@ -183,6 +183,57 @@ def _write_browser_config(config: dict[str, Any], out_path: str) -> str:
     return str(path)
 
 
+def _is_demo_target(target: dict[str, Any]) -> bool:
+    host = str(target.get("host", "")).lower()
+    return (
+        host in ("localhost", "127.0.0.1", "::1")
+        and int(target.get("port", 0) or 0) == 5434
+        and target.get("database") == "targetdb"
+        and target.get("user") == "target"
+    )
+
+
+def _reset_target_demo_db(target: dict[str, Any]) -> str:
+    if not _is_demo_target(target):
+        raise RuntimeError(
+            "Target reset is only enabled for the local Docker demo target "
+            "(localhost:5434/targetdb as user target)."
+        )
+
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host=target["host"],
+        port=target.get("port", 5432),
+        dbname=target["database"],
+        user=target["user"],
+        password=target["password"],
+    )
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""
+                DO $$
+                DECLARE r record;
+                BEGIN
+                  FOR r IN
+                    SELECT nspname
+                    FROM pg_namespace
+                    WHERE nspname NOT LIKE 'pg_%'
+                      AND nspname <> 'information_schema'
+                  LOOP
+                    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', r.nspname);
+                  END LOOP;
+                END $$;
+                CREATE SCHEMA IF NOT EXISTS public;
+                """)
+    finally:
+        conn.close()
+    return (
+        "Target demo database reset. All non-system schemas were dropped and public was recreated."
+    )
+
+
 def _session_defaults() -> None:
     defaults = {
         "active_config_path": "config.yaml",
@@ -434,6 +485,36 @@ def _approved_table_candidates(
         if item.get("action") in ("copy", "sync_metadata"):
             approved.append(key)
     return sorted(approved)
+
+
+def _default_load_strategy(item: dict[str, Any], allow_destructive: bool) -> str:
+    if item.get("action") != "copy":
+        return "skip"
+    if allow_destructive:
+        return "truncate_reload"
+    return "append_only"
+
+
+def _strategy_options(item: dict[str, Any], allow_destructive: bool) -> list[str]:
+    if item.get("action") != "copy":
+        return ["skip"]
+
+    options = ["append_only"]
+    if item.get("upsert_eligible"):
+        options.append("upsert")
+    if allow_destructive:
+        options.append("truncate_reload")
+    options.append("skip")
+    return options
+
+
+def _table_strategy_payload(
+    table_key: str, strategy: str, recommendation: dict[str, Any]
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"strategy": strategy}
+    if strategy == "upsert":
+        payload["conflict_key"] = list(recommendation.get("conflict_key") or [])
+    return payload
 
 
 def _workflow_status_rows() -> list[dict[str, Any]]:
@@ -701,6 +782,7 @@ def _approve(
     include_tables: list[str],
     exclude_tables: list[str],
     approved_manual_review_items: list[str],
+    table_strategies: dict[str, Any],
     notes: str,
     out_path: str,
 ) -> str:
@@ -713,6 +795,7 @@ def _approve(
         include_tables=include_tables or None,
         exclude_tables=exclude_tables or None,
         approved_manual_review_items=approved_manual_review_items or None,
+        table_strategies=table_strategies or None,
         notes=notes or None,
     )
     write_json(out_path, approval)
@@ -729,6 +812,10 @@ def _run(config_path: str, plan_path: str, approval_path: str, state_path: str, 
         state_file.unlink()
 
     approval_obj = load_approval(approval_path)
+    engine_cfg = cfg.setdefault("engine", {})
+    engine_cfg["allow_destructive"] = bool(approval_obj.allow_destructive)
+    if not approval_obj.allow_destructive:
+        engine_cfg.setdefault("copy", {})["truncate_first"] = False
     summary_obj = load_pre_summary(approval_obj.summary_path)
     original_plan = read_json(plan_path)
     filtered_plan = filter_plan_for_approval(
@@ -943,6 +1030,42 @@ def main() -> None:
                 type="password",
                 key="config_target_password",
             )
+
+            target_preview = _database_config(
+                db_type=DATABASE_TYPES[target_db_type_label],
+                host=target_host,
+                port=int(target_port),
+                database=target_database,
+                user=target_user,
+                password=target_password,
+            )
+            st.markdown("#### Demo Reset")
+            st.warning(
+                "Demo only: this drops every non-system schema in the target database and "
+                "recreates `public`. Use only with the local Docker target."
+            )
+            reset_confirmation = st.text_input(
+                "Type RESET TARGET to enable reset",
+                value="",
+                key="config_reset_target_confirmation",
+            )
+            reset_enabled = _is_demo_target(target_preview) and reset_confirmation == "RESET TARGET"
+            if not _is_demo_target(target_preview):
+                st.caption(
+                    "Reset is disabled unless target is localhost:5434/targetdb as user target."
+                )
+            if st.button(
+                "Reset Target Demo DB",
+                key="config_reset_target_button",
+                disabled=not reset_enabled,
+            ):
+                try:
+                    reset_message, stdout, stderr = _capture(_reset_target_demo_db, target_preview)
+                    st.session_state["flash_message"] = reset_message
+                    st.session_state["flash_kind"] = "success"
+                    st.rerun()
+                except Exception as exc:
+                    st.exception(exc)
 
         st.markdown("### Migration Defaults")
         c1, c2, c3 = st.columns(3)
@@ -1214,6 +1337,58 @@ def main() -> None:
         allow_destructive = st.checkbox(
             "Allow destructive actions", value=False, key="approve_allow_destructive"
         )
+        table_strategies: dict[str, Any] = {}
+        recommendation_map = {
+            f"{item.get('schema')}.{item.get('table')}": item
+            for item in (summary_obj or {}).get("table_recommendations", [])
+        }
+        strategy_tables = [table for table in include_tables if table not in set(exclude_tables)]
+        if strategy_tables:
+            st.markdown("### Per-Table Load Strategy")
+            st.caption(
+                "`append_only` does not truncate. `upsert` requires a validated primary key. "
+                "`truncate_reload` is only available when destructive actions are allowed."
+            )
+            for table_key in strategy_tables:
+                recommendation = recommendation_map.get(table_key)
+                if not recommendation:
+                    continue
+                action = recommendation.get("action")
+                if action != "copy":
+                    st.caption(f"{table_key}: action={action}; no data load strategy required.")
+                    continue
+
+                c_table, c_strategy, c_key = st.columns([3, 2, 3])
+                options = _strategy_options(recommendation, allow_destructive)
+                default_strategy = _default_load_strategy(recommendation, allow_destructive)
+                default_index = (
+                    options.index(default_strategy) if default_strategy in options else 0
+                )
+                with c_table:
+                    st.write(table_key)
+                    st.caption(
+                        f"risk={recommendation.get('risk_level')} "
+                        f"rows={recommendation.get('estimated_rows', '-')}"
+                    )
+                with c_strategy:
+                    strategy = st.selectbox(
+                        "Strategy",
+                        options=options,
+                        index=default_index,
+                        key=(
+                            f"approve_strategy_{approval_scope_key}_"
+                            f"{_safe_key(table_key)}_{allow_destructive}"
+                        ),
+                    )
+                with c_key:
+                    conflict_key = recommendation.get("conflict_key") or []
+                    key_text = ", ".join(conflict_key) if conflict_key else "-"
+                    st.write(f"Key: {key_text}")
+                    st.caption(f"key_readiness={recommendation.get('key_readiness')}")
+
+                table_strategies[table_key] = _table_strategy_payload(
+                    table_key, strategy, recommendation
+                )
         notes = st.text_area("Approval notes", value="", key="approve_notes")
         overlapping_tables = _approval_overlap(include_tables, exclude_tables)
         if overlapping_tables:
@@ -1230,6 +1405,11 @@ def main() -> None:
                 allow_destructive=allow_destructive,
                 approved_mode=mode,
             )
+            approved_candidates = [
+                table
+                for table in approved_candidates
+                if table_strategies.get(table, {}).get("strategy") != "skip"
+            ]
             st.caption(
                 f"Executable table candidates after approval filters: {len(approved_candidates)}"
             )
@@ -1257,6 +1437,11 @@ def main() -> None:
                 allow_destructive=allow_destructive,
                 approved_mode=mode,
             )
+            approved_candidates = [
+                table
+                for table in approved_candidates
+                if table_strategies.get(table, {}).get("strategy") != "skip"
+            ]
             if not approved_candidates and mode != "plan_only":
                 st.error(
                     "Approval would create an executable plan with 0 tables. Include at least "
@@ -1274,6 +1459,7 @@ def main() -> None:
                     include_tables,
                     exclude_tables,
                     approve_manual_review_items,
+                    table_strategies,
                     notes,
                     approval_path,
                 )

@@ -98,6 +98,9 @@ The strongest current path is Postgres-to-Postgres migration with:
 - rowcount and optional sample-hash verification
 - post-migration `ANALYZE` / `VACUUM ANALYZE`
 - approval-gated execution
+- per-table load strategies: append-only, upsert, truncate/reload, or skip
+- dry-run previews and execution graphs before mutation
+- retry-plan generation from failed or skipped execution state
 - optional Streamlit UI for browser-based testing
 
 The codebase also includes experimental or evolving support/scaffolding for:
@@ -114,8 +117,10 @@ The main workflow is:
 1. `analyze`
 2. `review`
 3. `approve`
-4. `run`
-5. `summarize-post`
+4. `dry-run`
+5. `run`
+6. `verify`
+7. `summarize-post`
 
 This is the recommended path for both heuristic and LLM planning because it separates read-only analysis from mutation.
 
@@ -131,9 +136,14 @@ This is the recommended path for both heuristic and LLM planning because it sepa
 - `review`
   - renders the pre-migration summary, planner critique, rationale, and clarification questions for human inspection
 - `approve`
-  - creates `approval.json` with the approved mode, scope, and destructive-policy choices
+  - creates `approval.json` with the approved mode, scope, table strategies, and destructive-policy choices
+- `dry-run`
+  - writes `dry_run_preview.json`, `dry_run_preview.md`, `execution_graph.json`, and `execution_graph.md`
+  - shows which approved steps would run, which strategy each table uses, and where destructive approval is required
 - `run`
   - executes only the approved subset of the plan
+- `verify`
+  - writes a standalone verification report for copied tables when deeper validation is wanted
 - `summarize-post`
   - produces a final post-migration summary from the plan, state file, and optional verification report
   - writes `failure_analysis.json` and `failure_analysis.md` so failed runs have an operator-facing diagnosis
@@ -147,8 +157,23 @@ The repo still exposes lower-level commands, but the approval-gated flow is stro
 - explicit migration modes
 - audit-friendly approval artifacts
 - scoped execution by approved tables
+- per-table choices between append-only, upsert, destructive truncate/reload, and skip
+- dry-run previews and execution graphs before mutation
 - post-migration summaries instead of only raw logs
 - plan critique, rationale, clarification prompts, and failure analysis as reviewable agent artifacts
+
+## v0.2.0 Core Migration Upgrade
+
+Version `0.2.0` adds the data-load controls needed for safer review demos and more realistic migration planning:
+
+- table recommendations now include key readiness, conflict keys, and upsert eligibility
+- approval artifacts can carry a per-table strategy instead of one global data-load behavior
+- `upsert` uses deterministic `INSERT ... ON CONFLICT` semantics for tables with validated keys
+- `append_only` prevents target truncation and is the safe default when destructive approval is off
+- `truncate_reload` stays behind both approval and executor destructive guards
+- `dry-run` renders the approved execution preview and graph before any mutation
+- `retry` produces a focused retry plan from failed or skipped execution state
+- the Streamlit workflow exposes per-table strategy controls and a guarded local Docker target reset button
 
 ## Planner Backends
 
@@ -264,8 +289,10 @@ Use the approval-gated flow against the local Docker Postgres pair:
 ```powershell
 python -m amo.cli analyze --config config.yaml --planner heuristic --out-dir runs\analysis_demo
 python -m amo.cli review --summary runs\analysis_demo\pre_migration_summary.json
-python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --out runs\analysis_demo\approval.json
+python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --table-strategy analytics.events=upsert --out runs\analysis_demo\approval.json
+python -m amo.cli dry-run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json --out-dir runs\analysis_demo
 python -m amo.cli run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json
+python -m amo.cli verify --config config.yaml --plan runs\analysis_demo\plan.json --out runs\analysis_demo\verification_report.json
 python -m amo.cli summarize-post --plan runs\analysis_demo\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_demo\pre_migration_summary.json --out runs\analysis_demo\post_migration_summary.json
 ```
 
@@ -303,7 +330,7 @@ Streamlit tab overview:
 | `Config` | Select an existing YAML config or generate one from source/target DB fields. Passwords are masked in the preview. | `runs/streamlit_config.yaml` or selected config file |
 | `Analyze` | Discover source and target, compute drift, generate the plan, and create pre-migration review artifacts. | `source_manifest.json`, `target_manifest.json`, `manifest_diff.json`, `plan.json`, `pre_migration_summary.json`, `planner_critique.json`, `clarification_questions.json`, `planner_rationale.md` |
 | `Review` | Inspect the pre-migration summary, drift, table recommendations, planner critique, and clarification questions before approving execution. | `pre_migration_summary.json` |
-| `Approve` | Choose included/excluded tables, approve manual-review items, set destructive-action policy, and write an approval artifact. The UI blocks tables from being both included and excluded. | `approval.json` |
+| `Approve` | Choose included/excluded tables, approve manual-review items, choose per-table load strategies, set destructive-action policy, and write an approval artifact. The UI blocks tables from being both included and excluded. | `approval.json` |
 | `Run` | Execute only the approved subset of the validated plan with checkpointed state. | timestamped `state_*.json` |
 | `Post Summary` | Build a tabular post-run summary and failure analysis from plan, state, pre-summary, and optional verification report. | `post_migration_summary.json`, `post_migration_summary.md`, `failure_analysis.json`, `failure_analysis.md` |
 | `Artifacts` | Show the active config and generated artifact paths so the run can be audited or reused from CLI/MCP. | all generated workflow artifacts |
@@ -316,6 +343,29 @@ Key labels in the UI map to CLI artifacts:
 - `Pre-Migration Summary File` -> `pre_migration_summary.json`
 - `Verification Report File (Optional)` -> standalone `verify` output if present
 - `Post-Migration Summary Output File` -> final summary written by the UI
+
+The Config tab also includes a guarded `Reset Target Demo DB` button for reviewers. It is enabled only for the local Docker target profile, requires typing `RESET TARGET`, and drops/recreates non-system target schemas so clean migrations can be tested repeatedly.
+
+## Product Screenshots
+
+Config tab with the guarded local Docker target reset:
+
+![Streamlit config reset](docs/screenshots/streamlit_config_reset.png)
+
+Analyze tab after the source/target drift scan and plan generation:
+
+![Streamlit analysis summary](docs/screenshots/streamlit_analyze_summary.png)
+
+Approve tab with per-table load strategy selectors:
+
+![Streamlit per-table strategies](docs/screenshots/streamlit_approve_strategies.png)
+
+Regenerate the screenshots from a running Streamlit app and reachable Docker demo databases:
+
+```powershell
+$env:STREAMLIT_URL="http://localhost:8501"
+node scripts\capture_ui_screenshots.mjs
+```
 
 ### 3. Hosted Demo Planner
 
@@ -474,6 +524,19 @@ Migration mode is selected during `analyze` and carried into `approval.json`. It
 
 The mode is not a bypass. The executor still runs only validated, allowlisted plan operations and only after a human-created approval artifact scopes the tables and destructive-action policy.
 
+## Per-Table Load Strategies
+
+The approval layer can now choose a load strategy per table:
+
+| Strategy | What it does | Safety boundary |
+| --- | --- | --- |
+| `append_only` | Copies source rows without truncating the target first. | Default safe choice when destructive approval is off. |
+| `upsert` | Stages source rows and merges with `INSERT ... ON CONFLICT`. | Available only when analysis finds a validated conflict key. |
+| `truncate_reload` | Truncates the target table and reloads source data. | Requires destructive approval and executor destructive guards. |
+| `skip` | Leaves the table out of the executable approval scope. | Useful for partial demos, manual-review tables, or staged migrations. |
+
+These strategies are written into `approval.json` under `table_strategies` and are enforced during approval filtering and execution. If destructive actions are not approved, the runner forces truncate-first behavior off before execution.
+
 ## Artifacts
 
 The main workflow writes a reusable artifact set:
@@ -484,9 +547,12 @@ The main workflow writes a reusable artifact set:
 - `plan.json`
 - `pre_migration_summary.json`
 - `approval.json`
+- `dry_run_preview.json`
+- `execution_graph.json`
 - `state.json` or timestamped state files
-- `report.json`
+- `verification_report.json`
 - `post_migration_summary.json`
+- `retry_plan.json` for retry-focused follow-up runs
 
 These make the process auditable, reviewable, and resumable.
 
@@ -498,6 +564,7 @@ This project is AI-assisted, not AI-autonomous.
 - execution uses allowlisted operations
 - destructive actions require explicit approval
 - approval can scope execution to specific tables
+- per-table strategies are validated before execution
 - manual-review items are surfaced before execution
 - the executor never runs arbitrary free-form model SQL
 
