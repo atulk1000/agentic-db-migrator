@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-db-migrator"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI-driven database migration orchestrator"
 authors = [{ name="Atul Kushwaha" }]
 requires-python = ">=3.10"

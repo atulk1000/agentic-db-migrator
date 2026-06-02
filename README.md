@@ -2,38 +2,62 @@
 
 [![CI](https://github.com/atulk1000/agentic-db-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/atulk1000/agentic-db-migrator/actions/workflows/ci.yml)
 
-An approval-gated database migration orchestrator for PostgreSQL with a CLI workflow, a browser dashboard, deterministic execution, and optional LLM planning adapters.
+An approval-gated AI migration agent for PostgreSQL. The project coordinates source/target observation, deterministic or LLM-backed planning, critique, human approval, dry-run validation, allowlisted execution, verification, and recovery artifacts.
 
 This repo is built around one core idea:
 
 - the planner recommends
+- the human approves
 - the executor enforces
 
 That separation matters. It means you can experiment with heuristic, hosted-demo, Gemini, or OpenAI planners without giving a model direct authority over mutation, DDL, or cutover behavior.
+
+The agent runtime boundary is explicit in [`src/amo/core/agent.py`](src/amo/core/agent.py): `MigrationAgent` coordinates the bounded loop while existing planner, policy, executor, verifier, and analysis modules keep their focused responsibilities.
 
 ```mermaid
 flowchart LR
     A["Source Postgres"] --> B["Manifest Builder"]
     C["Target Postgres"] --> B
     B --> D["Drift Analyzer"]
-    D --> E["Planner"]
-    E --> F["Validated plan.json"]
-    F --> G["Human Approval Gate"]
-    G --> H["Deterministic Executor"]
-    H --> I["Verifier"]
-    I --> J["Post-Migration Summary"]
+    D --> E["MigrationAgent"]
+    E --> F["Planner: heuristic / demo / Gemini / OpenAI"]
+    F --> G["Validated plan.json"]
+    G --> H["Critique + clarification artifacts"]
+    H --> I["Human Approval Gate"]
+    I --> J["Dry-run preview + execution graph"]
+    J --> K["Deterministic Executor"]
+    K --> L["Verifier"]
+    L --> M["Post-Migration Summary + recovery"]
 ```
+
+## AI Agent Architecture
+
+The project is agentic because it performs operational coordination, not just chat or SQL generation:
+
+| Agent phase | Current implementation | Artifact signal |
+| --- | --- | --- |
+| Observe | Source/target manifest discovery and drift analysis | `source_manifest.json`, `target_manifest.json`, `manifest_diff.json` |
+| Plan | Heuristic, demo, Gemini, or OpenAI planner backend | `plan.json` |
+| Critique | Planner critic, clarification questions, rationale renderer | `planner_critique.json`, `clarification_questions.json`, `planner_rationale.md` |
+| Approve | Human approval artifact with scope, destructive policy, and table strategies | `approval.json` |
+| Dry-run | Approval validation, filtered plan preview, dependency graph | `dry_run_preview.json`, `execution_graph.json` |
+| Execute | Deterministic allowlisted executor | `state.json` or timestamped state files |
+| Verify | Rowcount/sample verification | `verification_report.json` |
+| Recover | Failure analysis and retry planning | `failure_analysis.json`, `retry_plan.json` |
+
+`MigrationAgent` records phase status, blockers, and produced artifacts in `agent_trace.json`. It is intentionally bounded: it does not execute arbitrary LLM SQL, does not bypass approval, and does not treat heuristic mode as less agentic. Heuristic, Gemini, OpenAI, and hosted-demo planners are planner backends inside the same governed loop.
 
 ## Reviewer Path
 
 For a quick review, start with:
 
-1. [`examples/approval_workflow`](examples/approval_workflow) for the deterministic audit trail
-2. [`examples/llm_run`](examples/llm_run) for the model-output, repair, validation, and approval chain
-3. [`src/amo/core/planners/openai.py`](src/amo/core/planners/openai.py) and [`src/amo/core/planners/gemini.py`](src/amo/core/planners/gemini.py) for live planner adapters
-4. [`src/amo/core/planners/llm_common.py`](src/amo/core/planners/llm_common.py) for shared normalization, repair, and validation
-5. [`evals/cases`](evals/cases) for planner edge cases
-6. `python evals/run_planner_eval.py --planner heuristic` for the checked-in local eval path
+1. [`src/amo/core/agent.py`](src/amo/core/agent.py) for the explicit agent runtime boundary
+2. [`examples/approval_workflow`](examples/approval_workflow) for the deterministic audit trail
+3. [`examples/llm_run`](examples/llm_run) for the model-output, repair, validation, and approval chain
+4. [`src/amo/core/planners/openai.py`](src/amo/core/planners/openai.py) and [`src/amo/core/planners/gemini.py`](src/amo/core/planners/gemini.py) for live planner adapters
+5. [`src/amo/core/planners/llm_common.py`](src/amo/core/planners/llm_common.py) for shared normalization, repair, and validation
+6. [`evals/cases`](evals/cases) for planner edge cases
+7. `python evals/run_planner_eval.py --planner heuristic` for the checked-in local eval path
 
 ## Why This Repo Is Interesting
 
@@ -175,6 +199,25 @@ Version `0.2.0` adds the data-load controls needed for safer review demos and mo
 - `retry` produces a focused retry plan from failed or skipped execution state
 - the Streamlit workflow exposes per-table strategy controls and a guarded local Docker target reset button
 
+## v0.3.0 Agent Runtime Coordination
+
+Version `0.3.0` makes the agent boundary explicit in [`src/amo/core/agent.py`](src/amo/core/agent.py).
+
+The project was already coordinated as an approval-gated workflow. The new `MigrationAgent` runtime makes that coordination visible as a reviewable loop:
+
+```text
+observe -> plan -> critique -> approval -> dry-run -> execute -> verify -> summarize
+```
+
+The runtime is not an autonomy bypass. It calls the existing manifest, planner, analysis, approval, executor, verifier, and summary modules, writes the same JSON/Markdown artifacts, and records an `agent_trace.json` showing phase status, blockers, and artifact paths.
+
+Current runtime pieces:
+
+- `MigrationAgent`: coordinates the bounded migration agent loop
+- `AgentPhaseResult`: records phase status, blockers, artifacts, and next phase
+- `AgentRunState`: tracks run-level config, planner, mode, current phase, and artifact paths
+- `agent-run`: optional CLI command for running the coordinated non-mutating phases and, only with approval, execution
+
 ## Planner Backends
 
 The CLI and browser UI accept:
@@ -290,13 +333,29 @@ Use the approval-gated flow against the local Docker Postgres pair:
 python -m amo.cli analyze --config config.yaml --planner heuristic --out-dir runs\analysis_demo
 python -m amo.cli review --summary runs\analysis_demo\pre_migration_summary.json
 python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --table-strategy analytics.events=upsert --out runs\analysis_demo\approval.json
-python -m amo.cli dry-run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json --out-dir runs\analysis_demo
+python -m amo.cli dry-run --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json --out runs\analysis_demo\dry_run_preview.json
 python -m amo.cli run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json
 python -m amo.cli verify --config config.yaml --plan runs\analysis_demo\plan.json --out runs\analysis_demo\verification_report.json
 python -m amo.cli summarize-post --plan runs\analysis_demo\plan.json --state runs\state_YYYYMMDD_HHMMSS.json --pre-summary runs\analysis_demo\pre_migration_summary.json --out runs\analysis_demo\post_migration_summary.json
 ```
 
-### 2. Browser Demo
+### 2. Agent Runtime Demo
+
+Run the explicit agent coordinator through the read/review phases:
+
+```powershell
+python -m amo.cli agent-run --config config.yaml --planner heuristic --mode safe_sync --out-dir runs\agent_demo
+```
+
+This creates `agent_trace.json` and stops at the approval boundary. To execute, provide an approval artifact and opt in:
+
+```powershell
+python -m amo.cli agent-run --config config.yaml --planner heuristic --mode safe_sync --out-dir runs\agent_demo --approval runs\agent_demo\approval.json --execute
+```
+
+The command still validates the approval with dry-run before mutation and executes only the approved filtered plan.
+
+### 3. Browser Demo
 
 A lightweight Streamlit dashboard is included in [`streamlit_app.py`](streamlit_app.py).
 
@@ -367,7 +426,7 @@ $env:STREAMLIT_URL="http://localhost:8501"
 node scripts\capture_ui_screenshots.mjs
 ```
 
-### 3. Hosted Demo Planner
+### 4. Hosted Demo Planner
 
 The `demo` planner is intended for public demos where repository users should not need direct Gemini or OpenAI credentials. Instead of calling a model provider from the local machine, the app can call a small hosted planning service controlled by the project owner.
 
@@ -432,11 +491,20 @@ The repo includes:
 Current Docker services:
 
 - `source-db`
-  - seeded Postgres source database
+  - seeded Postgres source database, exposed to the host as `localhost:5433`
 - `target-db`
-  - empty Postgres target database
+  - target Postgres database, exposed to the host as `localhost:5434`
 - `migrator`
-  - app container built from the repo and configured to launch the Streamlit workflow dashboard
+  - app container built from the repo and configured to launch the Streamlit workflow dashboard on `localhost:8501`
+
+The containerized app connects to the databases over Docker's internal network:
+
+| Role | Host inside `migrator` | Port | Database | User |
+| --- | --- | ---: | --- | --- |
+| Source | `source-db` | `5432` | `sourcedb` | `source` |
+| Target | `target-db` | `5432` | `targetdb` | `target` |
+
+That path avoids Windows host-port edge cases and is the recommended review/demo route.
 
 Bring the stack up with:
 
@@ -455,6 +523,8 @@ You can still run CLI commands through the same image:
 ```powershell
 docker compose run --rm migrator python -m amo.cli analyze --config config.yaml --planner heuristic --out-dir runs/analysis_demo
 ```
+
+For local Python execution outside Docker, use `config.yaml` plus `.env` with host ports `localhost:5433` and `localhost:5434`. If host-port authentication behaves oddly on Windows, use the containerized app path above.
 
 ## Quickstart
 
