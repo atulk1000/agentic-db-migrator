@@ -104,7 +104,9 @@ def artifact_kind(obj: dict[str, Any]) -> str:
         return "failure_analysis"
     if "steps" in obj and "planner" in obj:
         return "migration_plan"
-    if "approved_mode" in obj and "summary_path" in obj:
+    if "approved_mode" in obj and (
+        "summary_path" in obj or (obj.get("schema_version") == "2" and "summary" in obj)
+    ):
         return "approval"
     if "completed" in obj or "failed" in obj or "skipped" in obj:
         return "run_state"

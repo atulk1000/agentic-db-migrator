@@ -4,6 +4,7 @@ import json
 import re
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from typing import Any
 import psycopg2
 from psycopg2 import extensions as ext
 from psycopg2 import pool, sql
+
+from amo.core.policy import ApprovedExecutionBundle
 
 ARCHIVED_SUFFIX = "_archive"
 TABLE_SUFFIX = "_table"
@@ -1269,40 +1272,60 @@ class MigrationOrchestrator:
             self._put_tgt(tgt)
 
 
-def execute(
+def _execute_plan(
     cfg: dict[str, Any],
-    plan_path: str | None = None,
+    plan_obj: dict[str, Any],
+    plan_sha256: str,
     state_path: str = "state.json",
-    plan_obj: dict[str, Any] | None = None,
 ) -> None:
-    orch = MigrationOrchestrator(cfg)
     state_file = Path(state_path)
 
-    state = (
-        _read_json(state_file)
-        if state_file.exists()
-        else {"completed": {}, "started_at": time.time()}
-    )
+    if state_file.exists():
+        state = _read_json(state_file)
+        state_plan_sha256 = state.get("plan_sha256")
+        if not state_plan_sha256:
+            raise RuntimeError(
+                "State file predates plan integrity binding. Use a fresh state file for this run."
+            )
+        if state_plan_sha256 != plan_sha256:
+            raise RuntimeError("State file belongs to a different approved plan.")
+    else:
+        state = {
+            "schema_version": "2",
+            "plan_sha256": plan_sha256,
+            "completed": {},
+            "started_at": time.time(),
+        }
     completed = state.get("completed", {})
 
     def mark(step_id: str, payload: dict[str, Any]) -> None:
-        completed[step_id] = payload
+        prior = completed.get(step_id) or {}
+        attempts = list(prior.get("attempts") or [])
+        finished_at = time.time()
+        elapsed_s = float(payload.get("elapsed_s") or 0.0)
+        status = "succeeded" if payload.get("ok") else "failed"
+        attempt = {
+            "attempt": len(attempts) + 1,
+            "started_at": finished_at - elapsed_s,
+            "finished_at": finished_at,
+            "status": status,
+            **payload,
+        }
+        completed[step_id] = {**payload, "status": status, "attempts": [*attempts, attempt]}
         state["completed"] = completed
-        state["updated_at"] = time.time()
+        state["updated_at"] = finished_at
         _write_json(state_file, state)
 
+    orch = MigrationOrchestrator(cfg)
     try:
-        if plan_obj is None and not plan_path:
-            raise RuntimeError("V2 executor expects a plan.json (plan-driven).")
-
-        plan = plan_obj if plan_obj is not None else _read_json(plan_path)
-        steps = plan.get("steps", [])
+        steps = plan_obj.get("steps", [])
         if not steps:
             raise RuntimeError("plan.json has no steps.")
 
         for step in steps:
             step_id = step.get("id") or f"{step.get('schema')}.{step.get('table')}.{step.get('op')}"
-            if step_id in completed:
+            existing = completed.get(step_id) or {}
+            if existing.get("ok") is True or existing.get("status") == "succeeded":
                 print(f"SKIP {step_id}")
                 continue
 
@@ -1401,3 +1424,27 @@ def execute(
 
     finally:
         orch.close()
+
+
+def execute(
+    *,
+    cfg: dict[str, Any],
+    bundle: ApprovedExecutionBundle,
+    state_path: str = "state.json",
+) -> None:
+    """Execute only a validated plan that is bound to an exact approval artifact set."""
+
+    if bundle.approval.approved_mode == "plan_only":
+        raise RuntimeError("Approved mode plan_only cannot be executed.")
+
+    execution_cfg = deepcopy(cfg)
+    engine_cfg = execution_cfg.setdefault("engine", {})
+    engine_cfg["allow_destructive"] = bool(bundle.approval.allow_destructive)
+    engine_cfg.setdefault("copy", {})["truncate_first"] = False
+
+    _execute_plan(
+        cfg=execution_cfg,
+        plan_obj=bundle.filtered_plan,
+        plan_sha256=bundle.plan_sha256,
+        state_path=state_path,
+    )

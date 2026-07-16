@@ -7,12 +7,22 @@ An approval-gated AI migration agent for PostgreSQL. The project coordinates sou
 This repo is built around one core idea:
 
 - the planner recommends
-- the human approves
-- the executor enforces
+- the human approves an exact artifact set
+- the deterministic executor validates and enforces that approval
 
 That separation matters. It means you can experiment with heuristic, hosted-demo, Gemini, or OpenAI planners without giving a model direct authority over mutation, DDL, or cutover behavior.
 
 The agent runtime boundary is explicit in [`src/amo/core/agent.py`](src/amo/core/agent.py): `MigrationAgent` coordinates the bounded loop while existing planner, policy, executor, verifier, and analysis modules keep their focused responsibilities.
+
+## Three-Minute Reviewer Path
+
+1. Open [`examples/approval_workflow/approval.json`](examples/approval_workflow/approval.json) and confirm it binds the plan, summary, and source manifest by SHA-256.
+2. Open [`src/amo/core/policy.py`](src/amo/core/policy.py) to see integrity validation, trusted metadata hydration, approval filtering, and retry-scope enforcement.
+3. Open [`src/amo/core/executor.py`](src/amo/core/executor.py) to see the approved-bundle-only execution boundary and plan-bound checkpoint state.
+4. Run `python -m pytest -q -m "not integration"` to validate the unit, example-consistency, and README-link checks.
+5. Inspect [`examples/llm_run`](examples/llm_run) to compare model output with the validated, approval-bound artifact chain.
+
+For broader planner behavior, run `python evals/run_planner_eval.py --planner heuristic` and inspect [`evals/cases`](evals/cases).
 
 ```mermaid
 flowchart LR
@@ -39,25 +49,13 @@ The project is agentic because it performs operational coordination, not just ch
 | Observe | Source/target manifest discovery and drift analysis | `source_manifest.json`, `target_manifest.json`, `manifest_diff.json` |
 | Plan | Heuristic, demo, Gemini, or OpenAI planner backend | `plan.json` |
 | Critique | Planner critic, clarification questions, rationale renderer | `planner_critique.json`, `clarification_questions.json`, `planner_rationale.md` |
-| Approve | Human approval artifact with scope, destructive policy, and table strategies | `approval.json` |
-| Dry-run | Approval validation, filtered plan preview, dependency graph | `dry_run_preview.json`, `execution_graph.json` |
+| Approve | Schema-v2 approval binding the exact plan, summary, source manifest, scope, and destructive policy | `approval.json` |
+| Dry-run | Digest validation, filtered plan preview, dependency graph | `dry_run_preview.json`, `execution_graph.json` |
 | Execute | Deterministic allowlisted executor | `state.json` or timestamped state files |
 | Verify | Rowcount/sample verification | `verification_report.json` |
 | Recover | Failure analysis and retry planning | `failure_analysis.json`, `retry_plan.json` |
 
 `MigrationAgent` records phase status, blockers, and produced artifacts in `agent_trace.json`. It is intentionally bounded: it does not execute arbitrary LLM SQL, does not bypass approval, and does not treat heuristic mode as less agentic. Heuristic, Gemini, OpenAI, and hosted-demo planners are planner backends inside the same governed loop.
-
-## Reviewer Path
-
-For a quick review, start with:
-
-1. [`src/amo/core/agent.py`](src/amo/core/agent.py) for the explicit agent runtime boundary
-2. [`examples/approval_workflow`](examples/approval_workflow) for the deterministic audit trail
-3. [`examples/llm_run`](examples/llm_run) for the model-output, repair, validation, and approval chain
-4. [`src/amo/core/planners/openai.py`](src/amo/core/planners/openai.py) and [`src/amo/core/planners/gemini.py`](src/amo/core/planners/gemini.py) for live planner adapters
-5. [`src/amo/core/planners/llm_common.py`](src/amo/core/planners/llm_common.py) for shared normalization, repair, and validation
-6. [`evals/cases`](evals/cases) for planner edge cases
-7. `python evals/run_planner_eval.py --planner heuristic` for the checked-in local eval path
 
 ## Why This Repo Is Interesting
 
@@ -160,12 +158,13 @@ This is the recommended path for both heuristic and LLM planning because it sepa
 - `review`
   - renders the pre-migration summary, planner critique, rationale, and clarification questions for human inspection
 - `approve`
-  - creates `approval.json` with the approved mode, scope, table strategies, and destructive-policy choices
+  - creates approval-schema-v2 `approval.json` with SHA-256 bindings for the exact plan, pre-migration summary, and source manifest
+  - records the approved mode, scope, table strategies, destructive policy, and an operator-supplied audit label
 - `dry-run`
   - writes `dry_run_preview.json`, `dry_run_preview.md`, `execution_graph.json`, and `execution_graph.md`
-  - shows which approved steps would run, which strategy each table uses, and where destructive approval is required
+  - validates all bound artifact digests before showing which approved steps would run
 - `run`
-  - executes only the approved subset of the plan
+  - requires `--approval` and executes only the validated, approved subset of the plan
 - `verify`
   - writes a standalone verification report for copied tables when deeper validation is wanted
 - `summarize-post`
@@ -217,6 +216,19 @@ Current runtime pieces:
 - `AgentPhaseResult`: records phase status, blockers, artifacts, and next phase
 - `AgentRunState`: tracks run-level config, planner, mode, current phase, and artifact paths
 - `agent-run`: optional CLI command for running the coordinated non-mutating phases and, only with approval, execution
+
+## Unreleased v0.3.1 Security and Correctness Stabilization
+
+The current working tree adds the approval-schema-v2 boundary described in [`docs/security_correctness_stabilization_v0_3_1_prd.md`](docs/security_correctness_stabilization_v0_3_1_prd.md):
+
+- approvals bind the exact plan, pre-migration summary, and source manifest bytes by SHA-256
+- every supported mutation entrypoint requires a validated approval
+- executable SQL-bearing metadata is hydrated from the approved source manifest
+- checkpoint state is bound to the approved plan digest and preserves attempt history
+- retries can select only unchanged steps from the original approved filtered plan
+- package, secret-scan, example-consistency, and PostgreSQL integration gates are separated in CI
+
+This is not yet presented as a `0.3.1` release. The package version remains `0.3.0` until all release blockers, including credential-incident closure and final CI verification, are complete. See [`CHANGELOG.md`](CHANGELOG.md) for compatibility notes.
 
 ## Planner Backends
 
@@ -304,8 +316,10 @@ The project is designed so model output can influence planning, but deterministi
 | Transfer strategy | Suggest full copy, chunked copy, or partition-wise copy | Execute only supported plan ops |
 | Chunking | Recommend chunk columns and counts | Verify columns exist and remain schema-bound |
 | Verification | Recommend rowcount or sample-hash depth | Run verifier against source and target |
-| Risk handling | Flag warnings and manual-review items | Require explicit approval before execution |
-| SQL execution | No free-form SQL authority | Executor builds allowlisted DDL/COPY operations |
+| Risk handling | Flag warnings and manual-review items | Require approval-schema-v2 before every mutation |
+| Artifact identity | Refer to reviewed artifacts | Verify exact plan, summary, and source-manifest SHA-256 values before database connection |
+| Destructive authority | Recommend a strategy | Derive authority only from `approval.allow_destructive` and approved table strategies |
+| SQL execution | Propose structured object metadata | Replace SQL-bearing values with approved source-manifest values and execute allowlisted operations |
 
 ## Large-Migration Features
 
@@ -332,7 +346,7 @@ Use the approval-gated flow against the local Docker Postgres pair:
 ```powershell
 python -m amo.cli analyze --config config.yaml --planner heuristic --out-dir runs\analysis_demo
 python -m amo.cli review --summary runs\analysis_demo\pre_migration_summary.json
-python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --mode safe_sync --table-strategy analytics.events=upsert --out runs\analysis_demo\approval.json
+python -m amo.cli approve --plan runs\analysis_demo\plan.json --summary runs\analysis_demo\pre_migration_summary.json --source-manifest runs\analysis_demo\source_manifest.json --mode safe_sync --table-strategy analytics.events=upsert --out runs\analysis_demo\approval.json
 python -m amo.cli dry-run --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json --out runs\analysis_demo\dry_run_preview.json
 python -m amo.cli run --config config.yaml --plan runs\analysis_demo\plan.json --approval runs\analysis_demo\approval.json
 python -m amo.cli verify --config config.yaml --plan runs\analysis_demo\plan.json --out runs\analysis_demo\verification_report.json
@@ -386,7 +400,7 @@ Streamlit tab overview:
 
 | Tab | Purpose | Primary artifacts |
 | --- | --- | --- |
-| `Config` | Select an existing YAML config or generate one from source/target DB fields. Passwords are masked in the preview. | `runs/streamlit_config.yaml` or selected config file |
+| `Config` | Select an existing YAML config or generate one from source/target DB fields. Generated files use `SRC_PASSWORD` / `DST_PASSWORD` placeholders; entered values stay in the Streamlit process environment. | `runs/streamlit_config.yaml` or selected config file |
 | `Analyze` | Discover source and target, compute drift, generate the plan, and create pre-migration review artifacts. | `source_manifest.json`, `target_manifest.json`, `manifest_diff.json`, `plan.json`, `pre_migration_summary.json`, `planner_critique.json`, `clarification_questions.json`, `planner_rationale.md` |
 | `Review` | Inspect the pre-migration summary, drift, table recommendations, planner critique, and clarification questions before approving execution. | `pre_migration_summary.json` |
 | `Approve` | Choose included/excluded tables, approve manual-review items, choose per-table load strategies, set destructive-action policy, and write an approval artifact. The UI blocks tables from being both included and excluded. | `approval.json` |
@@ -589,7 +603,7 @@ Migration mode is selected during `analyze` and carried into `approval.json`. It
 | `missing_only` | Fill gaps in a target environment without refreshing already-present tables. | Copies tables that exist in source but are missing in target; skips existing target tables. |
 | `metadata_diff_only` | Bring compatible schema metadata closer to source without doing a broad data refresh. | Copies missing tables, syncs compatible auxiliary metadata drift where possible, and routes incompatible structural drift to manual review. |
 | `data_diff_only` | Focus on data movement when schemas are already compatible. | Copies structurally compatible or missing tables, while skipping schema-level objects such as UDFs/materialized views during approval filtering. |
-| `full_refresh` | Refresh approved compatible tables from source to target. | Recommends copy for compatible tables and missing targets; destructive behavior such as truncation still depends on config and approval policy. |
+| `full_refresh` | Refresh approved compatible tables from source to target. | Recommends copy for compatible tables and missing targets; truncation still requires an approved `truncate_reload` strategy and destructive approval. |
 | `plan_only` | Produce review artifacts without execution. | Generates analysis, plan, critique, rationale, and summary artifacts, but cannot be executed by `run`. |
 
 The mode is not a bypass. The executor still runs only validated, allowlisted plan operations and only after a human-created approval artifact scopes the tables and destructive-action policy.
@@ -630,13 +644,17 @@ These make the process auditable, reviewable, and resumable.
 
 This project is AI-assisted, not AI-autonomous.
 
-- plans are validated against strict schemas
-- execution uses allowlisted operations
-- destructive actions require explicit approval
-- approval can scope execution to specific tables
-- per-table strategies are validated before execution
-- manual-review items are surfaced before execution
-- the executor never runs arbitrary free-form model SQL
+- every supported mutation path requires an approval artifact with `schema_version: "2"`
+- approval binds exact plan, summary, and source-manifest bytes; editing or reserializing any one invalidates the approval
+- legacy approvals are rejected rather than silently upgraded; regenerate them after reviewing the current artifacts
+- `approved_by` is an audit label supplied by the operator, not authenticated identity
+- config cannot elevate destructive authority beyond the approval
+- per-table strategies and manual-review scope are validated before opening database pools
+- planner-provided SQL-bearing metadata is replaced with approved source-manifest values
+- retry plans may only select unchanged steps in their original approved order
+- checkpoint state is bound to the approved plan digest and retains each failed or successful attempt
+
+See [`SECURITY.md`](SECURITY.md) for private reporting guidance and credential-response expectations.
 
 ## Project Structure
 
@@ -713,16 +731,60 @@ What is still evolving:
 - `spark_jdbc` support is scaffolded but not yet battle-hardened
 - Streamlit is a lightweight workflow dashboard, not a polished product UI
 - the eval suite should keep growing with deeper destructive-policy, failure-recovery, and multi-schema dependency cases
+- approval records are file-based audit artifacts, not cryptographic signatures or authenticated user identity
+- the current secret-scan CI job protects the checked-out snapshot; historical credential response still requires provider-side revocation and alert closure
+
+## License
+
+This project is available under the [`MIT License`](LICENSE).
 
 ## Testing
 
-Run the local checks with:
+Run unit, artifact-consistency, and README-link checks with:
 
 ```powershell
 python -m compileall src tests
-python -m pytest -q
+python -m pytest -q -m "not integration"
 python evals/run_planner_eval.py --planner heuristic
 python evals/run_planner_eval.py --planner openai  # optional; requires OPENAI_API_KEY
+```
+
+Run the PostgreSQL integration workflow against the repository's Docker Compose source/target pair:
+
+```powershell
+docker compose up -d source-db target-db
+$env:AMO_RUN_INTEGRATION = "1"
+python -m pytest -q -m integration tests/integration
+```
+
+The integration test resets only the `app` and `audit` schemas in those dedicated demo databases. It covers append, upsert, truncate denial/approval, partitions, sequences, indexes, foreign keys, UDFs, materialized views, grants, artifact tampering, untrusted metadata, and retry history.
+
+If ports `5433` or `5434` are already in use, choose alternate host ports and pass the same values to the integration test:
+
+```powershell
+$env:SOURCE_DB_PORT = "15433"
+$env:TARGET_DB_PORT = "15434"
+docker compose up -d source-db target-db
+$env:AMO_RUN_INTEGRATION = "1"
+$env:AMO_SOURCE_PORT = $env:SOURCE_DB_PORT
+$env:AMO_TARGET_PORT = $env:TARGET_DB_PORT
+python -m pytest -q -m integration tests/integration
+```
+
+Build and smoke-test the distributable artifacts without editable installation:
+
+```powershell
+python -m build
+python -m twine check dist/*
+python -m venv wheel-venv
+wheel-venv\Scripts\python -m pip install (Get-ChildItem dist\*.whl | Select-Object -First 1)
+wheel-venv\Scripts\python scripts\wheel_smoke.py
+```
+
+CI scans the current repository snapshot with Gitleaks `v8.30.1`. The equivalent Docker command is:
+
+```powershell
+docker run --rm -v "${PWD}:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 dir --redact --verbose --no-banner /repo
 ```
 
 Format and lint before publishing:

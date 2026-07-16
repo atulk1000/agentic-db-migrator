@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -144,18 +145,56 @@ class TableStrategy(BaseModel):
         return [part for part in value if part]
 
 
+class ArtifactDigest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    sha256: str
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("artifact path cannot be empty")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str) -> str:
+        normalized = value.lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+            raise ValueError("sha256 must be a 64-character lowercase hexadecimal digest")
+        return normalized
+
+
 class ApprovalDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["2"] = "2"
     approved_mode: MigrationMode
     approved_at: str
     approved_by: str = "manual"
-    plan_path: str
-    summary_path: str
+    plan: ArtifactDigest
+    summary: ArtifactDigest
+    source_manifest: ArtifactDigest
     allow_destructive: bool = False
     included_tables: list[str] = Field(default_factory=list)
     excluded_tables: list[str] = Field(default_factory=list)
     approved_manual_review_items: list[str] = Field(default_factory=list)
     table_strategies: dict[str, TableStrategy] = Field(default_factory=dict)
     notes: str | None = None
+
+    @property
+    def plan_path(self) -> str:
+        return self.plan.path
+
+    @property
+    def summary_path(self) -> str:
+        return self.summary.path
+
+    @property
+    def source_manifest_path(self) -> str:
+        return self.source_manifest.path
 
 
 class PostMigrationExecutionOverview(BaseModel):
