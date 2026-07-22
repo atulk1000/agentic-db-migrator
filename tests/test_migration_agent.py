@@ -132,10 +132,10 @@ def test_migration_agent_executes_valid_approval_and_summarizes(tmp_path, monkey
     _patch_agent_dependencies(monkeypatch)
     captured = {}
 
-    def fake_execute(*, cfg, plan_path, state_path, plan_obj):
+    def fake_execute(*, cfg, bundle, state_path):
         captured["cfg"] = cfg
-        captured["plan_path"] = plan_path
-        captured["plan_obj"] = plan_obj
+        captured["bundle"] = bundle
+        captured["plan_obj"] = bundle.filtered_plan
         Path(state_path).write_text(
             json.dumps(
                 {
@@ -180,8 +180,7 @@ def test_migration_agent_executes_valid_approval_and_summarizes(tmp_path, monkey
     summary = agent.summarize()
 
     assert summary.ok is True
-    assert captured["cfg"]["engine"]["allow_destructive"] is False
-    assert captured["cfg"]["engine"]["copy"]["truncate_first"] is False
+    assert captured["bundle"].approval.allow_destructive is False
     assert captured["plan_obj"]["approval"]["approved_tables"] == ["public.users"]
     assert (tmp_path / "agent" / "post_migration_summary.json").exists()
 

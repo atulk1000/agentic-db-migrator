@@ -376,12 +376,15 @@ def test_filter_plan_for_approval_keeps_only_approved_tables(tmp_path):
 
     plan_path = tmp_path / "plan.json"
     summary_path = tmp_path / "summary.json"
+    source_manifest_path = tmp_path / "source_manifest.json"
     write_json(plan_path, _plan())
     write_json(summary_path, pre_summary)
+    write_json(source_manifest_path, source_manifest)
 
     approval = build_approval_document(
         plan_path=plan_path,
         summary_path=summary_path,
+        source_manifest_path=source_manifest_path,
         approved_mode="safe_sync",
         include_tables=["public.users", "analytics.events"],
         exclude_tables=["public.orders"],
@@ -461,12 +464,23 @@ def test_build_approval_document_uses_schema_name_for_default_includes(tmp_path)
     }
     summary_path = tmp_path / "summary.json"
     plan_path = tmp_path / "plan.json"
+    source_manifest_path = tmp_path / "source_manifest.json"
     write_json(summary_path, summary)
     write_json(plan_path, _plan())
+    write_json(
+        source_manifest_path,
+        _manifest(
+            [
+                _table("analytics", "events", estimated_rows=1, columns=[]),
+                _table("demo", "users", estimated_rows=1, columns=[]),
+            ]
+        ),
+    )
 
     approval = build_approval_document(
         plan_path=plan_path,
         summary_path=summary_path,
+        source_manifest_path=source_manifest_path,
         approved_mode="safe_sync",
     )
 
@@ -495,12 +509,15 @@ def test_table_strategy_upsert_rewrites_copy_step_and_defaults_conflict_key(tmp_
     )
     summary_path = tmp_path / "summary.json"
     plan_path = tmp_path / "plan.json"
+    source_manifest_path = tmp_path / "source_manifest.json"
     write_json(summary_path, pre_summary)
     write_json(plan_path, _plan())
+    write_json(source_manifest_path, source_manifest)
 
     approval = build_approval_document(
         plan_path=plan_path,
         summary_path=summary_path,
+        source_manifest_path=source_manifest_path,
         approved_mode="safe_sync",
         include_tables=["public.users"],
         table_strategies={"public.users": {"strategy": "upsert"}},
@@ -537,11 +554,14 @@ def test_dry_run_blocks_upsert_without_safe_key(tmp_path):
     )
     summary_path = tmp_path / "summary.json"
     plan_path = tmp_path / "plan.json"
+    source_manifest_path = tmp_path / "source_manifest.json"
     write_json(summary_path, pre_summary)
     write_json(plan_path, _plan())
+    write_json(source_manifest_path, source_manifest)
     approval = build_approval_document(
         plan_path=plan_path,
         summary_path=summary_path,
+        source_manifest_path=source_manifest_path,
         approved_mode="safe_sync",
         include_tables=["public.users"],
         table_strategies={"public.users": {"strategy": "upsert", "conflict_key": ["id"]}},
@@ -575,11 +595,14 @@ def test_dry_run_blocks_truncate_reload_without_destructive_approval(tmp_path):
     )
     summary_path = tmp_path / "summary.json"
     plan_path = tmp_path / "plan.json"
+    source_manifest_path = tmp_path / "source_manifest.json"
     write_json(summary_path, pre_summary)
     write_json(plan_path, _plan())
+    write_json(source_manifest_path, source_manifest)
     approval = build_approval_document(
         plan_path=plan_path,
         summary_path=summary_path,
+        source_manifest_path=source_manifest_path,
         approved_mode="safe_sync",
         include_tables=["public.users"],
         table_strategies={"public.users": {"strategy": "truncate_reload"}},

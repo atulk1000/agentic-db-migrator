@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,23 @@ import pytest
 pytest.importorskip("streamlit")
 
 import streamlit_app
+
+
+def test_browser_config_keeps_password_out_of_written_document(monkeypatch):
+    monkeypatch.delenv("AMO_TEST_DB_PASSWORD", raising=False)
+
+    config = streamlit_app._database_config_with_env_password(
+        db_type="postgresql",
+        host="localhost",
+        port=5432,
+        database="demo",
+        user="demo",
+        password="local-secret-value",
+        password_env="AMO_TEST_DB_PASSWORD",
+    )
+
+    assert config["password"] == "${AMO_TEST_DB_PASSWORD}"
+    assert os.environ["AMO_TEST_DB_PASSWORD"] == "local-secret-value"
 
 
 def _summary_payload() -> dict:
@@ -62,13 +80,16 @@ def _summary_payload() -> dict:
 def test_streamlit_approve_writes_table_strategies(tmp_path):
     summary_path = tmp_path / "summary.json"
     plan_path = tmp_path / "plan.json"
+    source_manifest_path = tmp_path / "source_manifest.json"
     approval_path = tmp_path / "approval.json"
     summary_path.write_text(json.dumps(_summary_payload()))
     plan_path.write_text("{}")
+    source_manifest_path.write_text("{}")
 
     streamlit_app._approve(
         str(plan_path),
         str(summary_path),
+        str(source_manifest_path),
         "safe_sync",
         "reviewer",
         False,
@@ -94,7 +115,7 @@ def test_demo_target_guard_only_allows_local_docker_target():
     )
 
 
-def test_streamlit_run_applies_approval_destructive_flag(tmp_path, monkeypatch):
+def test_streamlit_run_passes_destructive_approval_bundle(tmp_path, monkeypatch):
     captured = {}
 
     monkeypatch.setattr(streamlit_app, "load_env", lambda *_args, **_kwargs: None)
@@ -103,33 +124,21 @@ def test_streamlit_run_applies_approval_destructive_flag(tmp_path, monkeypatch):
         "load_config",
         lambda _path: {"engine": {"allow_destructive": False, "copy": {"truncate_first": True}}},
     )
-    monkeypatch.setattr(
-        streamlit_app,
-        "load_approval",
-        lambda _path: SimpleNamespace(
+    bundle = SimpleNamespace(
+        approval=SimpleNamespace(
             allow_destructive=True,
-            summary_path=str(tmp_path / "summary.json"),
             included_tables=["public.users"],
             excluded_tables=[],
-            model_dump=lambda mode="python": {"allow_destructive": True},
         ),
-    )
-    monkeypatch.setattr(
-        streamlit_app,
-        "load_pre_summary",
-        lambda _path: SimpleNamespace(model_dump=lambda mode="python": {}),
-    )
-    monkeypatch.setattr(streamlit_app, "read_json", lambda _path: {"steps": []})
-    monkeypatch.setattr(
-        streamlit_app,
-        "filter_plan_for_approval",
-        lambda **_kwargs: {
+        filtered_plan={
             "steps": [{"id": "step_0001", "op": "copy_table", "schema": "public", "table": "users"}]
         },
     )
+    monkeypatch.setattr(streamlit_app, "build_approved_execution_bundle", lambda **_kwargs: bundle)
 
-    def fake_execute(*, cfg, plan_path, state_path, plan_obj):
+    def fake_execute(*, cfg, bundle, state_path):
         captured["cfg"] = cfg
+        captured["bundle"] = bundle
         Path(state_path).write_text("{}")
 
     monkeypatch.setattr(streamlit_app, "execute", fake_execute)
@@ -143,10 +152,10 @@ def test_streamlit_run_applies_approval_destructive_flag(tmp_path, monkeypatch):
     )
 
     assert state_path == str(tmp_path / "state.json")
-    assert captured["cfg"]["engine"]["allow_destructive"] is True
+    assert captured["bundle"].approval.allow_destructive is True
 
 
-def test_streamlit_run_disables_truncate_for_non_destructive_approval(tmp_path, monkeypatch):
+def test_streamlit_run_passes_non_destructive_approval_bundle(tmp_path, monkeypatch):
     captured = {}
 
     monkeypatch.setattr(streamlit_app, "load_env", lambda *_args, **_kwargs: None)
@@ -155,33 +164,21 @@ def test_streamlit_run_disables_truncate_for_non_destructive_approval(tmp_path, 
         "load_config",
         lambda _path: {"engine": {"allow_destructive": True, "copy": {"truncate_first": True}}},
     )
-    monkeypatch.setattr(
-        streamlit_app,
-        "load_approval",
-        lambda _path: SimpleNamespace(
+    bundle = SimpleNamespace(
+        approval=SimpleNamespace(
             allow_destructive=False,
-            summary_path=str(tmp_path / "summary.json"),
             included_tables=["public.users"],
             excluded_tables=[],
-            model_dump=lambda mode="python": {"allow_destructive": False},
         ),
-    )
-    monkeypatch.setattr(
-        streamlit_app,
-        "load_pre_summary",
-        lambda _path: SimpleNamespace(model_dump=lambda mode="python": {}),
-    )
-    monkeypatch.setattr(streamlit_app, "read_json", lambda _path: {"steps": []})
-    monkeypatch.setattr(
-        streamlit_app,
-        "filter_plan_for_approval",
-        lambda **_kwargs: {
+        filtered_plan={
             "steps": [{"id": "step_0001", "op": "copy_table", "schema": "public", "table": "users"}]
         },
     )
+    monkeypatch.setattr(streamlit_app, "build_approved_execution_bundle", lambda **_kwargs: bundle)
 
-    def fake_execute(*, cfg, plan_path, state_path, plan_obj):
+    def fake_execute(*, cfg, bundle, state_path):
         captured["cfg"] = cfg
+        captured["bundle"] = bundle
         Path(state_path).write_text("{}")
 
     monkeypatch.setattr(streamlit_app, "execute", fake_execute)
@@ -194,5 +191,4 @@ def test_streamlit_run_disables_truncate_for_non_destructive_approval(tmp_path, 
         fresh=True,
     )
 
-    assert captured["cfg"]["engine"]["allow_destructive"] is False
-    assert captured["cfg"]["engine"]["copy"]["truncate_first"] is False
+    assert captured["bundle"].approval.allow_destructive is False

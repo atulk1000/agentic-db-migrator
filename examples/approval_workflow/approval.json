@@ -9,6 +9,25 @@
     "analytics.events"
   ],
   "notes": "Approve only the missing analytics.events table for this example run.",
-  "plan_path": "examples/approval_workflow/plan.json",
-  "summary_path": "examples/approval_workflow/pre_migration_summary.json"
+  "plan": {
+    "path": "examples/approval_workflow/plan.json",
+    "sha256": "0aae20333422ff6d18f36a778bb8e8c6a541b18bb262d543222c0c7d50a7a33d"
+  },
+  "schema_version": "2",
+  "source_manifest": {
+    "path": "examples/approval_workflow/source_manifest.json",
+    "sha256": "b4867efca780d9dad4e12d6562b909804835e1ff8a30dc2215a933f23ddd35f9"
+  },
+  "summary": {
+    "path": "examples/approval_workflow/pre_migration_summary.json",
+    "sha256": "bab5eb6912d14161993a2ec273c2bde5bb96de1eb94bd6271a1b9c127312fd5a"
+  },
+  "table_strategies": {
+    "analytics.events": {
+      "conflict_key": [],
+      "preserve_target_only_columns": true,
+      "staging_schema": null,
+      "strategy": "append_only"
+    }
+  }
 }

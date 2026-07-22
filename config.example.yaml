@@ -4,10 +4,10 @@ app:
 engine:
   type: copy                 # copy | spark_jdbc
   auto_ddl: true
-  allow_destructive: true     # required if truncate_first=true
+  allow_destructive: false    # compatibility field; approval is the only authority
   verify_inline: false        # you can keep external verifier instead
   copy:
-    truncate_first: true
+    truncate_first: false      # compatibility default; per-table approval selects truncation
     spool_dir: null           # or "./.spool"
     batchsize: 10000
 

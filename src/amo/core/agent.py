@@ -25,8 +25,6 @@ from amo.core.analysis import (
     build_post_migration_summary,
     build_pre_migration_summary,
     diff_manifests,
-    load_approval,
-    load_pre_summary,
     read_json,
     render_dry_run_preview,
     render_execution_graph,
@@ -36,6 +34,7 @@ from amo.core.analysis import (
 )
 from amo.core.config import load_config, load_env
 from amo.core.planners.models import validate_plan_document
+from amo.core.policy import ApprovalPolicyError, build_approved_execution_bundle
 from amo.core.workflow_models import MigrationMode
 
 PLANNER_MODULES = {
@@ -329,13 +328,14 @@ class MigrationAgent:
     ) -> AgentPhaseResult:
         plan_path = self._artifact("plan")
         summary_path = self._artifact("pre_migration_summary")
-        if not plan_path or not summary_path:
+        source_manifest_path = self._artifact("source_manifest")
+        if not plan_path or not summary_path or not source_manifest_path:
             return self._record(
                 AgentPhaseResult(
                     phase=AgentPhase.APPROVAL,
                     ok=False,
-                    message="Cannot prepare approval before plan and summary artifacts exist.",
-                    blockers=["missing plan or pre_migration_summary artifact"],
+                    message="Cannot prepare approval before plan, summary, and source manifest exist.",
+                    blockers=["missing plan, pre_migration_summary, or source_manifest artifact"],
                 )
             )
 
@@ -343,6 +343,7 @@ class MigrationAgent:
         approval = build_approval_document(
             plan_path=plan_path,
             summary_path=summary_path,
+            source_manifest_path=source_manifest_path,
             approved_mode=self.state.migration_mode,
             approved_by=approved_by,
             allow_destructive=allow_destructive,
@@ -376,33 +377,35 @@ class MigrationAgent:
                     next_phase=AgentPhase.APPROVAL,
                 )
             )
-        approval_obj = load_approval(approval_path)
-        plan_path = approval_obj.plan_path or self._artifact("plan")
-        if not plan_path:
+        try:
+            bundle = build_approved_execution_bundle(approval_path=approval_path)
+        except ApprovalPolicyError as exc:
             return self._record(
                 AgentPhaseResult(
                     phase=AgentPhase.DRY_RUN,
                     ok=False,
-                    message="Plan artifact is required before dry-run.",
-                    blockers=["plan artifact required"],
+                    message="Approved artifacts failed integrity validation.",
+                    blockers=[str(exc)],
                 )
             )
 
         self._remember("approval", approval_path)
-        self._remember("plan", plan_path)
-        summary_obj = load_pre_summary(approval_obj.summary_path)
-        plan_obj = read_json(plan_path)
+        self._remember("plan", bundle.plan_path)
+        self._remember("source_manifest", bundle.source_manifest_path)
         preview = build_dry_run_preview(
-            plan=plan_obj,
-            summary=summary_obj.model_dump(mode="python"),
-            approval=approval_obj.model_dump(mode="python"),
+            plan=bundle.validated_plan,
+            summary=bundle.pre_migration_summary.model_dump(mode="python", by_alias=True),
+            approval=bundle.approval.model_dump(mode="python", by_alias=True),
         )
+        preview["integrity"] = bundle.integrity_report()
 
         preview_path = self._path("dry_run_preview.json")
         preview_md_path = self._path("dry_run_preview.md")
         graph_path = self._path("execution_graph.json")
         graph_md_path = self._path("execution_graph.md")
+        approved_plan_path = self._path("approved_plan.json")
         write_json(preview_path, preview)
+        write_json(approved_plan_path, bundle.filtered_plan)
         preview_md_path.write_text(render_dry_run_preview(preview), encoding="utf-8")
         graph = (
             build_execution_graph(preview["filtered_plan"])
@@ -418,6 +421,7 @@ class MigrationAgent:
             "dry_run_preview_md": self._remember("dry_run_preview_md", preview_md_path),
             "execution_graph": self._remember("execution_graph", graph_path),
             "execution_graph_md": self._remember("execution_graph_md", graph_md_path),
+            "approved_plan": self._remember("approved_plan", approved_plan_path),
         }
         blockers = [item.get("reason", "blocked") for item in preview.get("blocked", [])]
         return self._record(
@@ -453,23 +457,24 @@ class MigrationAgent:
                     next_phase=AgentPhase.APPROVAL,
                 )
             )
-        approval_obj = load_approval(approval_path)
-        plan_path = approval_obj.plan_path or self._artifact("plan")
-        if not plan_path:
+        try:
+            bundle = build_approved_execution_bundle(approval_path=approval_path)
+        except ApprovalPolicyError as exc:
             return self._record(
                 AgentPhaseResult(
                     phase=AgentPhase.EXECUTE,
                     ok=False,
-                    message="Plan artifact is required before execution.",
-                    blockers=["plan artifact required"],
+                    message="Approved artifacts failed integrity validation.",
+                    blockers=[str(exc)],
                 )
             )
 
         load_env(".env")
         cfg = load_config(self.state.config_path)
         self._remember("approval", approval_path)
-        self._remember("plan", plan_path)
-        if approval_obj.approved_mode == "plan_only":
+        self._remember("plan", bundle.plan_path)
+        self._remember("source_manifest", bundle.source_manifest_path)
+        if bundle.approval.approved_mode == "plan_only":
             return self._record(
                 AgentPhaseResult(
                     phase=AgentPhase.EXECUTE,
@@ -480,18 +485,12 @@ class MigrationAgent:
                 )
             )
 
-        engine_cfg = cfg.setdefault("engine", {})
-        engine_cfg["allow_destructive"] = bool(approval_obj.allow_destructive)
-        if not approval_obj.allow_destructive:
-            engine_cfg.setdefault("copy", {})["truncate_first"] = False
-
-        summary_obj = load_pre_summary(approval_obj.summary_path)
-        plan_obj = read_json(plan_path)
         preview = build_dry_run_preview(
-            plan=plan_obj,
-            summary=summary_obj.model_dump(mode="python"),
-            approval=approval_obj.model_dump(mode="python"),
+            plan=bundle.validated_plan,
+            summary=bundle.pre_migration_summary.model_dump(mode="python", by_alias=True),
+            approval=bundle.approval.model_dump(mode="python", by_alias=True),
         )
+        preview["integrity"] = bundle.integrity_report()
         if not preview.get("ok"):
             blockers = [item.get("reason", "blocked") for item in preview.get("blocked", [])]
             return self._record(
@@ -514,9 +513,8 @@ class MigrationAgent:
 
         executor(
             cfg=cfg,
-            plan_path=plan_path,
+            bundle=bundle,
             state_path=state_path,
-            plan_obj=preview["filtered_plan"],
         )
         artifacts = {"state": self._remember("state", state_path)}
         return self._record(
@@ -530,7 +528,7 @@ class MigrationAgent:
         )
 
     def verify(self, *, report_path: str | None = None) -> AgentPhaseResult:
-        plan_path = self._artifact("plan")
+        plan_path = self._artifact("approved_plan") or self._artifact("plan")
         if not plan_path:
             return self._record(
                 AgentPhaseResult(
@@ -567,7 +565,7 @@ class MigrationAgent:
         report_path: str | None = None,
         out_path: str | None = None,
     ) -> AgentPhaseResult:
-        plan_path = self._artifact("plan")
+        plan_path = self._artifact("approved_plan") or self._artifact("plan")
         state_path = state_path or self._artifact("state")
         report_path = report_path or self._artifact("verification_report")
         pre_summary_path = self._artifact("pre_migration_summary")

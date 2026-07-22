@@ -9,6 +9,25 @@
     "analytics.events"
   ],
   "notes": "Approve LLM-recommended large-table copy and post-load maintenance.",
-  "plan_path": "examples/llm_run/validated_plan.json",
-  "summary_path": "examples/llm_run/pre_migration_summary.json"
+  "plan": {
+    "path": "examples/llm_run/validated_plan.json",
+    "sha256": "462ff4e6d2b9fd11c70b8341d07373dbb8d5af59dd5ad3ceca2117ee5bcb1adc"
+  },
+  "schema_version": "2",
+  "source_manifest": {
+    "path": "examples/llm_run/source_manifest.json",
+    "sha256": "8178d54cac201b1c21d3637804b60bdb5b9552814be3d3eff0efb454adca4ec2"
+  },
+  "summary": {
+    "path": "examples/llm_run/pre_migration_summary.json",
+    "sha256": "e5ba233c7160cddd5fa8901a332315a38612b0454515dbf82819deb7a12059a8"
+  },
+  "table_strategies": {
+    "analytics.events": {
+      "conflict_key": [],
+      "preserve_target_only_columns": true,
+      "staging_schema": null,
+      "strategy": "append_only"
+    }
+  }
 }

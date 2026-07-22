@@ -7,12 +7,12 @@ services:
       POSTGRES_PASSWORD: source
       POSTGRES_DB: sourcedb
     ports:
-      - "5433:5432"
+      - "${SOURCE_DB_PORT:-5433}:5432"
     volumes:
       - ./seed:/docker-entrypoint-initdb.d
       - source_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U source"]
+      test: ["CMD-SHELL", "pg_isready -U source -d sourcedb"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,11 +25,11 @@ services:
       POSTGRES_PASSWORD: target
       POSTGRES_DB: targetdb
     ports:
-      - "5434:5432"
+      - "${TARGET_DB_PORT:-5434}:5432"
     volumes:
       - target_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U target"]
+      test: ["CMD-SHELL", "pg_isready -U target -d targetdb"]
       interval: 10s
       timeout: 5s
       retries: 5

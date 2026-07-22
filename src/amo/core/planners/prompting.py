@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,6 @@ from amo.core.planners.llm_common import root_tables
 from amo.core.planners.models import MigrationManifest
 
 PROMPT_VERSION = "migration_planner_v1"
-PROMPT_PATH = Path(__file__).with_name("prompts") / f"{PROMPT_VERSION}.md"
 
 
 def load_optional_json(path: str | None) -> dict[str, Any] | None:
@@ -28,7 +28,12 @@ def build_migration_prompt(
     allowed_tables = ", ".join(
         sorted(f"{table.schema_name}.{table.table}" for table in root_tables(manifest))
     )
-    template = PROMPT_PATH.read_text(encoding="utf-8")
+    template = (
+        files("amo.core.planners")
+        .joinpath("prompts")
+        .joinpath(f"{PROMPT_VERSION}.md")
+        .read_text(encoding="utf-8")
+    )
     context_json = json.dumps(planning_context or {}, indent=2, sort_keys=True)
     return template.format(
         allowed_tables=allowed_tables,

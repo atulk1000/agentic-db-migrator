@@ -1,0 +1,106 @@
+{
+  "completed": {
+    "step_0001": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "elapsed_s": 0.018,
+          "finished_at": 1777852920.018,
+          "ok": true,
+          "started_at": 1777852920.0,
+          "status": "succeeded"
+        }
+      ],
+      "elapsed_s": 0.018,
+      "ok": true,
+      "status": "succeeded"
+    },
+    "step_0002": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "elapsed_s": 0.042,
+          "finished_at": 1777852920.06,
+          "ok": true,
+          "started_at": 1777852920.018,
+          "status": "succeeded"
+        }
+      ],
+      "elapsed_s": 0.042,
+      "ok": true,
+      "status": "succeeded"
+    },
+    "step_0003": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "elapsed_s": 1.731,
+          "finished_at": 1777852921.791,
+          "ok": true,
+          "started_at": 1777852920.06,
+          "status": "succeeded"
+        }
+      ],
+      "elapsed_s": 1.731,
+      "ok": true,
+      "status": "succeeded"
+    },
+    "step_0004": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "elapsed_s": 0.117,
+          "finished_at": 1777852921.908,
+          "ok": true,
+          "started_at": 1777852921.791,
+          "status": "succeeded"
+        }
+      ],
+      "elapsed_s": 0.117,
+      "ok": true,
+      "status": "succeeded"
+    },
+    "step_0005": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "elapsed_s": 0.084,
+          "finished_at": 1777852921.992,
+          "ok": true,
+          "started_at": 1777852921.908,
+          "status": "succeeded"
+        }
+      ],
+      "elapsed_s": 0.084,
+      "ok": true,
+      "status": "succeeded",
+      "verify": {
+        "ok": true,
+        "sample_hash_ok": true,
+        "schema": "analytics",
+        "source_rows": 20000,
+        "table": "events",
+        "target_rows": 20000
+      }
+    },
+    "step_0006": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "elapsed_s": 0.055,
+          "finished_at": 1777852922.047,
+          "ok": true,
+          "started_at": 1777852921.992,
+          "status": "succeeded"
+        }
+      ],
+      "elapsed_s": 0.055,
+      "ok": true,
+      "status": "succeeded"
+    }
+  },
+  "plan_sha256": "0aae20333422ff6d18f36a778bb8e8c6a541b18bb262d543222c0c7d50a7a33d",
+  "schema_version": "2",
+  "started_at": 1777852920.0,
+  "updated_at": 1777852922.1
+}

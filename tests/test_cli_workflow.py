@@ -145,6 +145,7 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
 
     summary_path = out_dir / "pre_migration_summary.json"
     plan_path = out_dir / "plan.json"
+    source_manifest_path = out_dir / "source_manifest.json"
     assert summary_path.exists()
     assert (out_dir / "manifest_diff.json").exists()
     assert (out_dir / "pre_migration_summary.md").exists()
@@ -162,6 +163,8 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
             str(plan_path),
             "--summary",
             str(summary_path),
+            "--source-manifest",
+            str(source_manifest_path),
             "--out",
             str(approval_path),
             "--mode",
@@ -199,11 +202,10 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
 
     captured = {}
 
-    def fake_execute(*, cfg, plan_path, state_path, plan_obj=None):
+    def fake_execute(*, cfg, bundle, state_path):
         captured["cfg"] = cfg
-        captured["plan_path"] = plan_path
         captured["state_path"] = state_path
-        captured["plan_obj"] = plan_obj
+        captured["plan_obj"] = bundle.filtered_plan
         state_payload = {
             "completed": {
                 "step_0001": {"ok": True},
@@ -245,11 +247,13 @@ def test_cli_analyze_review_approve_run_and_summarize_post(tmp_path, monkeypatch
     failed_state_path.write_text(
         json.dumps(
             {
+                "schema_version": "2",
+                "plan_sha256": approval_obj["plan"]["sha256"],
                 "completed": {
                     "step_0001": {"ok": True},
                     "step_0002": {"ok": True},
                     "step_0003": {"ok": False, "failure_class": "duplicate_key"},
-                }
+                },
             }
         )
     )

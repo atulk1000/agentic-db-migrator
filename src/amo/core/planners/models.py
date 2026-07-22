@@ -211,6 +211,16 @@ class MigrationPlan(BaseModel):
     source: SourceRef = Field(default_factory=SourceRef)
     steps: list[PlanStep] = Field(default_factory=list)
     planner_metadata: dict[str, Any] = Field(default_factory=dict)
+    approval: dict[str, Any] | None = None
+    retry: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_unique_step_ids(self) -> MigrationPlan:
+        step_ids = [step.id for step in self.steps]
+        duplicates = sorted({step_id for step_id in step_ids if step_ids.count(step_id) > 1})
+        if duplicates:
+            raise ValueError(f"plan step ids must be unique: {', '.join(duplicates)}")
+        return self
 
 
 def load_manifest_document(path: str | Path) -> MigrationManifest:

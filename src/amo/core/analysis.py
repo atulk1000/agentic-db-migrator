@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from amo.core.integrity import describe_artifact
 from amo.core.manifest_builder import build_manifest
 from amo.core.planners.models import ManifestTable, MigrationManifest, validate_plan_document
 from amo.core.workflow_models import (
     ApprovalDocument,
+    ArtifactDigest,
     KeyReadinessStatus,
     ManifestDiffDocument,
     ManifestDiffSummary,
@@ -563,6 +565,7 @@ def _normalize_table_strategies(
 def build_approval_document(
     plan_path: str | Path,
     summary_path: str | Path,
+    source_manifest_path: str | Path,
     approved_mode: MigrationMode,
     approved_by: str = "manual",
     allow_destructive: bool = False,
@@ -585,11 +588,13 @@ def build_approval_document(
     exclude_list = sorted(set(exclude_tables or []))
 
     approval = ApprovalDocument(
+        schema_version="2",
         approved_mode=approved_mode,
         approved_at=datetime.now(timezone.utc).isoformat(),
         approved_by=approved_by,
-        plan_path=str(plan_path),
-        summary_path=str(summary_path),
+        plan=ArtifactDigest.model_validate(describe_artifact(plan_path)),
+        summary=ArtifactDigest.model_validate(describe_artifact(summary_path)),
+        source_manifest=ArtifactDigest.model_validate(describe_artifact(source_manifest_path)),
         allow_destructive=allow_destructive,
         included_tables=include_list,
         excluded_tables=exclude_list,
@@ -643,6 +648,53 @@ def filter_plan_for_approval(
         and step.get("schema")
         and step.get("table")
     }
+    plan_table_keys = {
+        _table_key(step.get("schema"), step.get("table"))
+        for step in plan_obj.get("steps", [])
+        if step.get("schema") and step.get("table")
+    }
+    approved_table_objects = set(approved_actions)
+    partition_parent: str | None = None
+    for step in plan_obj.get("steps", []):
+        op = step.get("op")
+        schema = step.get("schema")
+        table = step.get("table")
+        table_key = _table_key(schema, table) if schema and table else None
+        if op == "ensure_table" and table_key in partition_parent_keys:
+            partition_parent = table_key if table_key in approved_actions else None
+            continue
+        if not partition_parent:
+            continue
+        if op in ("ensure_table", "copy_table") and table_key not in approved_actions:
+            if table_key:
+                approved_table_objects.add(table_key)
+            continue
+        if table_key == partition_parent and op in (
+            "sync_sequences",
+            "create_indexes",
+            "verify_table",
+            "analyze_table",
+            "vacuum_analyze_table",
+        ):
+            if op in ("verify_table", "analyze_table", "vacuum_analyze_table"):
+                partition_parent = None
+            continue
+        partition_parent = None
+
+    def apply_table_strategy(step: dict[str, Any], strategy: TableStrategy) -> dict[str, Any]:
+        updated_step = dict(step)
+        transfer = dict(updated_step.get("transfer") or {})
+        transfer["load_strategy"] = strategy.strategy
+        transfer.pop("conflict_key", None)
+        updated_step["op"] = "copy_table"
+        updated_step["conflict_key"] = []
+        if strategy.strategy == "upsert":
+            transfer["conflict_key"] = list(strategy.conflict_key)
+            updated_step["op"] = "upsert_table"
+            updated_step["conflict_key"] = list(strategy.conflict_key)
+        updated_step["transfer"] = transfer
+        return updated_step
+
     active_partition_parent: str | None = None
 
     for step in plan_obj.get("steps", []):
@@ -653,7 +705,13 @@ def filter_plan_for_approval(
 
         if active_partition_parent:
             if op in ("ensure_table", "copy_table") and table_key not in approved_actions:
-                filtered_steps.append(step)
+                if op == "copy_table":
+                    parent_strategy = table_strategies.get(
+                        active_partition_parent, TableStrategy(strategy="append_only")
+                    )
+                    filtered_steps.append(apply_table_strategy(step, parent_strategy))
+                else:
+                    filtered_steps.append(step)
                 continue
             if table_key == active_partition_parent and op in (
                 "sync_sequences",
@@ -690,32 +748,39 @@ def filter_plan_for_approval(
                 filtered_steps.append(updated_step)
             continue
 
-        if op in ("create_matviews", "create_mv_indexes"):
+        if op in ("create_matviews", "stage_matviews", "create_mv_indexes"):
             if approval_doc.approved_mode != "data_diff_only" and schema in approved_schemas:
                 filtered_steps.append(step)
+            continue
+
+        if op == "apply_grants":
+            if approval_doc.approved_mode != "data_diff_only" and schema in approved_schemas:
+                grants = []
+                for grant in step.get("grants", []):
+                    object_name = grant.get("object_name")
+                    object_schema = grant.get("schema") or schema
+                    object_key = _table_key(object_schema, object_name) if object_name else None
+                    if object_key in plan_table_keys and object_key not in approved_table_objects:
+                        continue
+                    grants.append(grant)
+                if grants:
+                    updated_step = dict(step)
+                    updated_step["grants"] = grants
+                    filtered_steps.append(updated_step)
             continue
 
         if not table_key or table_key not in approved_actions:
             continue
 
         action = approved_actions[table_key]
-        table_strategy = table_strategies.get(table_key)
+        table_strategy = table_strategies.get(table_key, TableStrategy(strategy="append_only"))
         if op == "ensure_table" and table_key in partition_parent_keys:
             active_partition_parent = table_key
         if action == "sync_metadata" and op not in ("ensure_table", "create_indexes"):
             continue
 
-        if table_strategy and op == "copy_table":
-            updated_step = dict(step)
-            transfer = dict(updated_step.get("transfer") or {})
-            transfer["load_strategy"] = table_strategy.strategy
-            if table_strategy.conflict_key:
-                transfer["conflict_key"] = list(table_strategy.conflict_key)
-            updated_step["transfer"] = transfer
-            if table_strategy.strategy == "upsert":
-                updated_step["op"] = "upsert_table"
-                updated_step["conflict_key"] = list(table_strategy.conflict_key)
-            filtered_steps.append(updated_step)
+        if op in ("copy_table", "upsert_table"):
+            filtered_steps.append(apply_table_strategy(step, table_strategy))
             continue
 
         filtered_steps.append(step)
@@ -892,9 +957,11 @@ def build_dry_run_preview(
 
 
 def render_dry_run_preview(preview: dict[str, Any]) -> str:
+    integrity = preview.get("integrity") or {}
     lines = [
         "Dry-Run Preview",
         f"Status: {'ready' if preview.get('ok') else 'blocked'}",
+        f"Artifact integrity: {integrity.get('status', 'not recorded')}",
         f"Approved mode: {preview.get('approved_mode', '-')}",
         f"Step count: {preview.get('step_count', 0)}",
         "",

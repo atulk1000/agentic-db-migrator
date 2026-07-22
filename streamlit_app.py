@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import inspect
 import io
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,6 @@ from amo.core.analysis import (
     build_post_migration_summary,
     build_pre_migration_summary,
     diff_manifests,
-    filter_plan_for_approval,
-    load_approval,
-    load_pre_summary,
     read_json,
     render_post_migration_summary,
     render_pre_migration_summary,
@@ -37,6 +35,7 @@ from amo.core.config import load_config, load_env
 from amo.core.executor import execute
 from amo.core.planners.heuristic_planner import write_plan
 from amo.core.planners.models import validate_plan_document
+from amo.core.policy import build_approved_execution_bundle
 from amo.core.workflow_models import MigrationMode
 
 PLANNER_MODULES = {
@@ -114,6 +113,27 @@ def _database_config(
         "user": user,
         "password": password,
     }
+
+
+def _database_config_with_env_password(
+    *,
+    db_type: str,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+    password_env: str,
+) -> dict[str, Any]:
+    os.environ[password_env] = password
+    return _database_config(
+        db_type=db_type,
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=f"${{{password_env}}}",
+    )
 
 
 def _build_browser_config(
@@ -239,6 +259,7 @@ def _session_defaults() -> None:
         "active_config_path": "config.yaml",
         "config_output_path": _default_streamlit_config_path(),
         "analysis_dir": _default_analysis_dir(),
+        "last_source_manifest_path": "",
         "last_plan_path": "",
         "last_summary_path": "",
         "last_approval_path": "",
@@ -281,7 +302,9 @@ def _artifact_kind(obj: dict[str, Any]) -> str:
         return "failure_analysis"
     if "steps" in obj and "planner" in obj:
         return "migration_plan"
-    if "approved_mode" in obj and "summary_path" in obj:
+    if "approved_mode" in obj and (
+        "summary_path" in obj or (obj.get("schema_version") == "2" and "summary" in obj)
+    ):
         return "approval"
     if "completed" in obj or "failed" in obj or "skipped" in obj:
         return "run_state"
@@ -776,6 +799,7 @@ def _analyze(config_path: str, planner: str, mode: MigrationMode, out_dir: str) 
 def _approve(
     plan_path: str,
     summary_path: str,
+    source_manifest_path: str,
     mode: MigrationMode,
     approved_by: str,
     allow_destructive: bool,
@@ -789,6 +813,7 @@ def _approve(
     approval = build_approval_document(
         plan_path=plan_path,
         summary_path=summary_path,
+        source_manifest_path=source_manifest_path,
         approved_mode=mode,
         approved_by=approved_by,
         allow_destructive=allow_destructive,
@@ -803,6 +828,10 @@ def _approve(
 
 
 def _run(config_path: str, plan_path: str, approval_path: str, state_path: str, fresh: bool) -> str:
+    bundle = build_approved_execution_bundle(
+        approval_path=approval_path,
+        plan_path=plan_path or None,
+    )
     load_env(".env")
     cfg = load_config(config_path)
 
@@ -811,21 +840,9 @@ def _run(config_path: str, plan_path: str, approval_path: str, state_path: str, 
     if fresh and state_file.exists():
         state_file.unlink()
 
-    approval_obj = load_approval(approval_path)
-    engine_cfg = cfg.setdefault("engine", {})
-    engine_cfg["allow_destructive"] = bool(approval_obj.allow_destructive)
-    if not approval_obj.allow_destructive:
-        engine_cfg.setdefault("copy", {})["truncate_first"] = False
-    summary_obj = load_pre_summary(approval_obj.summary_path)
-    original_plan = read_json(plan_path)
-    filtered_plan = filter_plan_for_approval(
-        plan=original_plan,
-        summary=summary_obj.model_dump(mode="python"),
-        approval=approval_obj.model_dump(mode="python"),
-    )
-    if not filtered_plan.get("steps"):
-        included = set(approval_obj.included_tables)
-        excluded = set(approval_obj.excluded_tables)
+    if not bundle.filtered_plan.get("steps"):
+        included = set(bundle.approval.included_tables)
+        excluded = set(bundle.approval.excluded_tables)
         overlap = sorted(included.intersection(excluded))
         if overlap:
             raise RuntimeError(
@@ -837,7 +854,7 @@ def _run(config_path: str, plan_path: str, approval_path: str, state_path: str, 
             "Approval filters removed every plan step. Recreate the approval with at least "
             "one copy or metadata-sync table included, or use Analyze/Review only for plan-only mode."
         )
-    execute(cfg=cfg, plan_path=plan_path, state_path=str(state_file), plan_obj=filtered_plan)
+    execute(cfg=cfg, bundle=bundle, state_path=str(state_file))
     return str(state_file)
 
 
@@ -1085,16 +1102,12 @@ def main() -> None:
                 key="config_max_partitions",
             )
         with c2:
-            config_allow_destructive = st.checkbox(
-                "Allow Destructive Execution",
-                value=True,
-                key="config_allow_destructive",
+            st.info(
+                "Generated configs are non-destructive. Destructive authority is selected only "
+                "in the approval step with a per-table truncate_reload strategy."
             )
-            config_truncate_first = st.checkbox(
-                "Truncate Target Before Copy",
-                value=True,
-                key="config_truncate_first",
-            )
+            config_allow_destructive = False
+            config_truncate_first = False
         with c3:
             config_sample_hash = st.checkbox(
                 "Enable Sample Hash Verification",
@@ -1139,21 +1152,23 @@ def main() -> None:
                 st.stop()
 
             browser_config = _build_browser_config(
-                source=_database_config(
+                source=_database_config_with_env_password(
                     db_type=DATABASE_TYPES[source_db_type_label],
                     host=source_host,
                     port=int(source_port),
                     database=source_database,
                     user=source_user,
                     password=source_password,
+                    password_env="SRC_PASSWORD",
                 ),
-                target=_database_config(
+                target=_database_config_with_env_password(
                     db_type=DATABASE_TYPES[target_db_type_label],
                     host=target_host,
                     port=int(target_port),
                     database=target_database,
                     user=target_user,
                     password=target_password,
+                    password_env="DST_PASSWORD",
                 ),
                 planner=planner,
                 max_partitions=int(config_max_partitions),
@@ -1168,7 +1183,9 @@ def main() -> None:
             created_path = _write_browser_config(browser_config, config_output_path)
             st.session_state["active_config_path"] = created_path
             st.session_state["config_output_path"] = created_path
-            st.session_state["flash_message"] = f"Config written to {created_path}"
+            st.session_state["flash_message"] = (
+                f"Config written to {created_path} with password environment placeholders."
+            )
             st.session_state["flash_kind"] = "success"
             st.rerun()
 
@@ -1196,6 +1213,7 @@ def main() -> None:
                     _analyze, config_path, planner, mode, analysis_dir
                 )
                 st.session_state["analysis_dir"] = analysis_dir
+                st.session_state["last_source_manifest_path"] = artifacts["source_manifest"]
                 st.session_state["last_plan_path"] = artifacts["plan"]
                 st.session_state["last_summary_path"] = artifacts["summary"]
                 st.session_state["last_critique_path"] = artifacts["critique"]
@@ -1284,6 +1302,11 @@ def main() -> None:
         summary_path = st.text_input(
             "Summary path", value=st.session_state["last_summary_path"], key="approve_summary_path"
         )
+        source_manifest_path = st.text_input(
+            "Source manifest path",
+            value=st.session_state["last_source_manifest_path"],
+            key="approve_source_manifest_path",
+        )
         approval_path = st.text_input(
             "Approval output path",
             value=str(Path(st.session_state["analysis_dir"]) / "approval.json"),
@@ -1299,6 +1322,11 @@ def main() -> None:
             summary_path,
             "pre_migration_summary",
             "Approve Summary path",
+        )
+        _read_expected_artifact(
+            source_manifest_path,
+            "manifest",
+            "Approve Source manifest path",
         )
         table_options: list[str] = []
         manual_review_options: list[str] = []
@@ -1423,6 +1451,11 @@ def main() -> None:
                         "pre_migration_summary",
                         "Approve Summary path",
                     ),
+                    _validate_artifact_path(
+                        source_manifest_path,
+                        "manifest",
+                        "Approve Source manifest path",
+                    ),
                 ]
             )
             if not inputs_ok:
@@ -1453,6 +1486,7 @@ def main() -> None:
                     _approve,
                     plan_path,
                     summary_path,
+                    source_manifest_path,
                     mode,
                     approved_by,
                     allow_destructive,

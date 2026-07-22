@@ -1,0 +1,73 @@
+{
+  "generated_at": "2026-05-04T00:00:00+00:00",
+  "planner": "heuristic_v2",
+  "planner_metadata": {},
+  "source": {
+    "database": "sourcedb",
+    "host": "source-db",
+    "port": 5432
+  },
+  "steps": [
+    {
+      "id": "step_0001",
+      "op": "ensure_schema",
+      "schema": "analytics"
+    },
+    {
+      "id": "step_0002",
+      "op": "ensure_table",
+      "schema": "analytics",
+      "table": "events"
+    },
+    {
+      "estimated_bytes": 3538944,
+      "estimated_rows": 20000,
+      "id": "step_0003",
+      "op": "copy_table",
+      "primary_key": [
+        "event_id"
+      ],
+      "schema": "analytics",
+      "table": "events",
+      "transfer": {
+        "chunk_column": "event_ts",
+        "chunk_count": 1,
+        "engine": "copy",
+        "geometry_mode": "default"
+      },
+      "validate": {
+        "rowcount": true,
+        "sample_hash": true,
+        "sample_rows": 50
+      }
+    },
+    {
+      "id": "step_0004",
+      "op": "create_indexes",
+      "schema": "analytics",
+      "table": "events"
+    },
+    {
+      "id": "step_0005",
+      "op": "verify_table",
+      "schema": "analytics",
+      "table": "events",
+      "validate": {
+        "rowcount": true,
+        "sample_hash": true,
+        "sample_rows": 50
+      }
+    },
+    {
+      "id": "step_0006",
+      "maintenance": {
+        "cluster_if_needed": false
+      },
+      "op": "analyze_table",
+      "schema": "analytics",
+      "table": "events"
+    }
+  ],
+  "strategy": "largest_first",
+  "version": "v2"
+}
