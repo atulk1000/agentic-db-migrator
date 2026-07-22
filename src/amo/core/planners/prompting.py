@@ -30,7 +30,8 @@ def build_migration_prompt(
     )
     template = (
         files("amo.core.planners")
-        .joinpath("prompts", f"{PROMPT_VERSION}.md")
+        .joinpath("prompts")
+        .joinpath(f"{PROMPT_VERSION}.md")
         .read_text(encoding="utf-8")
     )
     context_json = json.dumps(planning_context or {}, indent=2, sort_keys=True)
